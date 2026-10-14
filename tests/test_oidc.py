@@ -111,6 +111,15 @@ async def test_oidc_authorization_code_flow_provisions_unprivileged_user(
                 response for response in callbacks if response.status_code != 303
             )
             csrf = await client.get("/auth/oidc/csrf")
+            session_read = await client.get("/api/v1/servers")
+            session_mutation_without_csrf = await client.post(
+                "/api/v1/servers",
+                json={
+                    "name": "session-without-csrf",
+                    "display_name": "Session without CSRF",
+                    "endpoint": "https://example.com/mcp",
+                },
+            )
             invalid_bearer = await client.get(
                 "/api/v1/servers", headers={"Authorization": "Bearer invalid"}
             )
@@ -132,6 +141,8 @@ async def test_oidc_authorization_code_flow_provisions_unprivileged_user(
     assert cross_browser_callback.status_code == 400
     assert replayed_callback.status_code == 400
     assert csrf.status_code == 200
+    assert session_read.status_code == 403
+    assert session_mutation_without_csrf.status_code == 403
     assert invalid_bearer.status_code == 401
     assert bearer_mutation.status_code == 201
     assert logout_without_csrf.status_code == 403
