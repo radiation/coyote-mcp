@@ -1,6 +1,7 @@
 # coyote-mcp
 
 [![CI](https://github.com/radiation/coyote-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/radiation/coyote-mcp/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/radiation/coyote-mcp/actions/workflows/codeql.yml/badge.svg)](https://github.com/radiation/coyote-mcp/actions/workflows/codeql.yml)
 [![Codecov](https://codecov.io/gh/radiation/coyote-mcp/graph/badge.svg)](https://codecov.io/gh/radiation/coyote-mcp)
 
 Collection-aware enterprise MCP gateway. Phase 1 persists downstream server
@@ -273,6 +274,19 @@ POSTGRES_INTEGRATION_URL='postgresql+asyncpg://coyote:localdev-only@127.0.0.1:54
   uv run pytest tests/test_postgres_integration.py
 ```
 
+## Contributor and developer documentation
+
+Read [AGENTS.md](AGENTS.md) before contributing. It links the architectural
+invariants in [architecture guardrails](docs/architecture-guardrails.md) and
+the concise, source-grounded [AI context](docs/ai-context/) for product,
+backend, domain, security, priorities, and prompt guidance.
+
+CodeQL runs separately from CI on pull requests and pushes to `main`, weekly,
+and on demand. After the first hosted scan completes, review results in the
+repository's **Security** tab under **Code scanning alerts**. A repository
+administrator can then add the CodeQL analysis check as a required `main`
+branch-protection status check.
+
 ### Dependency updates and branch protection
 
 Dependabot checks Python dependencies (from `pyproject.toml` and the committed
@@ -289,7 +303,6 @@ CI status check as required (and optionally require the branch to be up to date)
 ## Explicitly not implemented yet
 
 - Tool execution routing
-- PAT/OIDC authentication and authorization
 - Search, embedding index, and collection filtering
 - HTMX dashboard (Jinja2 is provisioned only)
 - Metrics, audits, and production hardening
