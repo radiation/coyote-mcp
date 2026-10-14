@@ -1,11 +1,35 @@
 from collections.abc import AsyncIterator
+from datetime import timedelta
 
 import httpx
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coyote_mcp.app import app
+from coyote_mcp.auth import ALL_ACTIONS, issue_pat
 from coyote_mcp.db import get_session
+from coyote_mcp.models import Organization, Principal, RoleAssignment
+from coyote_mcp.settings import Settings
+
+
+async def credentials(session_factory: async_sessionmaker[AsyncSession]) -> dict[str, str]:
+    async with session_factory() as session:
+        organization = Organization(slug="api", display_name="API")
+        session.add(organization)
+        await session.flush()
+        principal = Principal(
+            organization_id=organization.id, identifier="tester", display_name="Tester"
+        )
+        session.add(principal)
+        await session.flush()
+        session.add(
+            RoleAssignment(organization_id=organization.id, principal_id=principal.id, role="owner")
+        )
+        await session.commit()
+        _, token = await issue_pat(
+            session, principal, "test", set(ALL_ACTIONS), timedelta(days=1), Settings()
+        )
+    return {"Authorization": f"Bearer {token}"}
 
 
 @pytest.mark.asyncio
@@ -18,6 +42,7 @@ async def test_register_server_and_duplicate_response(
 
     app.dependency_overrides[get_session] = override_session
     try:
+        headers = await credentials(session_factory)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
@@ -26,9 +51,9 @@ async def test_register_server_and_duplicate_response(
                 "display_name": "Example",
                 "endpoint": "https://example.com/mcp",
             }
-            response = await client.post("/api/v1/servers", json=payload)
-            duplicate = await client.post("/api/v1/servers", json=payload)
-            listing = await client.get("/api/v1/servers")
+            response = await client.post("/api/v1/servers", json=payload, headers=headers)
+            duplicate = await client.post("/api/v1/servers", json=payload, headers=headers)
+            listing = await client.get("/api/v1/servers", headers=headers)
     finally:
         app.dependency_overrides.clear()
 
@@ -48,11 +73,13 @@ async def test_collection_and_server_catalog_endpoints(
 
     app.dependency_overrides[get_session] = override_session
     try:
+        headers = await credentials(session_factory)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
             server = await client.post(
                 "/api/v1/servers",
+                headers=headers,
                 json={
                     "name": "catalog",
                     "display_name": "Catalog",
@@ -60,24 +87,32 @@ async def test_collection_and_server_catalog_endpoints(
                 },
             )
             server_id = server.json()["id"]
-            server_detail = await client.get(f"/api/v1/servers/{server_id}")
-            server_tools = await client.get(f"/api/v1/servers/{server_id}/tools")
+            server_detail = await client.get(f"/api/v1/servers/{server_id}", headers=headers)
+            server_tools = await client.get(f"/api/v1/servers/{server_id}/tools", headers=headers)
             collection = await client.post(
                 "/api/v1/collections",
+                headers=headers,
                 json={"slug": "engineering", "display_name": "Engineering"},
             )
             collection_id = collection.json()["id"]
-            collection_list = await client.get("/api/v1/collections")
+            collection_list = await client.get("/api/v1/collections", headers=headers)
             membership = await client.post(
                 f"/api/v1/collections/{collection_id}/servers",
+                headers=headers,
                 json={"server_id": server_id},
             )
-            collection_detail = await client.get(f"/api/v1/collections/{collection_id}")
-            collection_tools = await client.get(f"/api/v1/collections/{collection_id}/tools")
-            deleted = await client.delete(
-                f"/api/v1/collections/{collection_id}/servers/{server_id}"
+            collection_detail = await client.get(
+                f"/api/v1/collections/{collection_id}", headers=headers
             )
-            collection_without_membership = await client.get(f"/api/v1/collections/{collection_id}")
+            collection_tools = await client.get(
+                f"/api/v1/collections/{collection_id}/tools", headers=headers
+            )
+            deleted = await client.delete(
+                f"/api/v1/collections/{collection_id}/servers/{server_id}", headers=headers
+            )
+            collection_without_membership = await client.get(
+                f"/api/v1/collections/{collection_id}", headers=headers
+            )
     finally:
         app.dependency_overrides.clear()
 

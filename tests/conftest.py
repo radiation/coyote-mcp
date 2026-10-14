@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from coyote_mcp.models import Base
+from coyote_mcp.models import Base, Organization
 
 
 @pytest.fixture
@@ -24,3 +24,12 @@ async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 async def session(session_factory: async_sessionmaker[AsyncSession]) -> AsyncIterator[AsyncSession]:
     async with session_factory() as database_session:
         yield database_session
+
+
+@pytest.fixture
+async def organization(session: AsyncSession) -> Organization:
+    organization = Organization(slug="test", display_name="Test Organization")
+    session.add(organization)
+    await session.commit()
+    await session.refresh(organization)
+    return organization

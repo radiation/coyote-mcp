@@ -16,6 +16,9 @@ dependencies = [
   "jinja2>=3.1",
 ]
 
+[project.scripts]
+coyote-mcp = "coyote_mcp.cli:main"
+
 [dependency-groups]
 dev = [
   "ruff>=0.13",
