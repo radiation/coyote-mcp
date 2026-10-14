@@ -1,4 +1,7 @@
-from fastapi import FastAPI
+from collections.abc import Awaitable, Callable
+
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 from fastmcp import FastMCP
 from pydantic import BaseModel
 
@@ -20,6 +23,24 @@ async def gateway_info() -> str:
 
 mcp_app = mcp.http_app(path="/")
 app = FastAPI(title="coyote-mcp", lifespan=mcp_app.lifespan)
+
+
+@app.middleware("http")
+async def block_unsecured_mcp(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    if request.url.path.startswith("/mcp"):
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": (
+                    "MCP protocol operations are disabled until policy enforcement is available."
+                )
+            },
+        )
+    return await call_next(request)
+
+
 app.mount("/mcp", mcp_app)
 app.include_router(api_router)
 

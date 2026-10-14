@@ -7,3 +7,6 @@ class Settings(BaseSettings):
     allow_insecure_endpoints: bool = False
     allow_private_endpoints: bool = False
     discovery_timeout_seconds: float = 15.0
+    pat_max_lifetime_seconds: int = 60 * 60 * 24 * 90
+    default_organization_slug: str = "default"
+    default_organization_display_name: str = "Default Organization"

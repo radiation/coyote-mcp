@@ -16,8 +16,11 @@ class MissingResourceError(LookupError):
     pass
 
 
-async def create_server(session: AsyncSession, request: ServerCreate) -> MCPServer:
+async def create_server(
+    session: AsyncSession, organization_id: UUID, request: ServerCreate
+) -> MCPServer:
     server = MCPServer(
+        organization_id=organization_id,
         name=request.name,
         display_name=request.display_name,
         endpoint=str(request.endpoint),
@@ -33,40 +36,59 @@ async def create_server(session: AsyncSession, request: ServerCreate) -> MCPServ
     return server
 
 
-async def get_server(session: AsyncSession, server_id: UUID) -> MCPServer:
-    server = await session.get(MCPServer, server_id)
+async def get_server(session: AsyncSession, organization_id: UUID, server_id: UUID) -> MCPServer:
+    server = await session.scalar(
+        select(MCPServer).where(
+            MCPServer.id == server_id, MCPServer.organization_id == organization_id
+        )
+    )
     if server is None:
         raise MissingResourceError("Server not found.")
     return server
 
 
-async def list_servers(session: AsyncSession, limit: int, offset: int) -> list[MCPServer]:
+async def list_servers(
+    session: AsyncSession, organization_id: UUID, limit: int, offset: int
+) -> list[MCPServer]:
     return list(
         (
             await session.scalars(
-                select(MCPServer).order_by(MCPServer.name).limit(limit).offset(offset)
+                select(MCPServer)
+                .where(MCPServer.organization_id == organization_id)
+                .order_by(MCPServer.name)
+                .limit(limit)
+                .offset(offset)
             )
         ).all()
     )
 
 
 async def list_server_tools(
-    session: AsyncSession, server_id: UUID, limit: int, offset: int
+    session: AsyncSession, organization_id: UUID, server_id: UUID, limit: int, offset: int
 ) -> list[Tool]:
-    await get_server(session, server_id)
-    query = (
-        select(Tool)
-        .where(Tool.server_id == server_id)
-        .order_by(Tool.name, Tool.id)
-        .limit(limit)
-        .offset(offset)
+    await get_server(session, organization_id, server_id)
+    return list(
+        (
+            await session.scalars(
+                select(Tool)
+                .join(MCPServer)
+                .where(Tool.server_id == server_id, MCPServer.organization_id == organization_id)
+                .order_by(Tool.name, Tool.id)
+                .limit(limit)
+                .offset(offset)
+            )
+        ).all()
     )
-    return list((await session.scalars(query)).all())
 
 
-async def create_collection(session: AsyncSession, request: CollectionCreate) -> Collection:
+async def create_collection(
+    session: AsyncSession, organization_id: UUID, request: CollectionCreate
+) -> Collection:
     collection = Collection(
-        slug=request.slug, display_name=request.display_name, description=request.description
+        organization_id=organization_id,
+        slug=request.slug,
+        display_name=request.display_name,
+        description=request.description,
     )
     session.add(collection)
     try:
@@ -78,25 +100,45 @@ async def create_collection(session: AsyncSession, request: CollectionCreate) ->
     return collection
 
 
-async def get_collection(session: AsyncSession, collection_id: UUID) -> Collection:
-    collection = await session.get(Collection, collection_id)
+async def get_collection(
+    session: AsyncSession, organization_id: UUID, collection_id: UUID
+) -> Collection:
+    collection = await session.scalar(
+        select(Collection).where(
+            Collection.id == collection_id, Collection.organization_id == organization_id
+        )
+    )
     if collection is None:
         raise MissingResourceError("Collection not found.")
     return collection
 
 
-async def list_collections(session: AsyncSession, limit: int, offset: int) -> list[Collection]:
-    query = select(Collection).order_by(Collection.slug).limit(limit).offset(offset)
-    return list((await session.scalars(query)).all())
+async def list_collections(
+    session: AsyncSession, organization_id: UUID, limit: int, offset: int
+) -> list[Collection]:
+    return list(
+        (
+            await session.scalars(
+                select(Collection)
+                .where(Collection.organization_id == organization_id)
+                .order_by(Collection.slug)
+                .limit(limit)
+                .offset(offset)
+            )
+        ).all()
+    )
 
 
 async def add_membership(
-    session: AsyncSession, collection_id: UUID, request: MembershipCreate
+    session: AsyncSession, organization_id: UUID, collection_id: UUID, request: MembershipCreate
 ) -> CollectionMembership:
-    await get_collection(session, collection_id)
-    await get_server(session, request.server_id)
+    await get_collection(session, organization_id, collection_id)
+    await get_server(session, organization_id, request.server_id)
     membership = CollectionMembership(
-        collection_id=collection_id, server_id=request.server_id, enabled=request.enabled
+        collection_id=collection_id,
+        server_id=request.server_id,
+        organization_id=organization_id,
+        enabled=request.enabled,
     )
     session.add(membership)
     try:
@@ -108,30 +150,36 @@ async def add_membership(
     return membership
 
 
-async def remove_membership(session: AsyncSession, collection_id: UUID, server_id: UUID) -> None:
+async def remove_membership(
+    session: AsyncSession, organization_id: UUID, collection_id: UUID, server_id: UUID
+) -> None:
     membership = await session.get(CollectionMembership, (collection_id, server_id))
-    if membership is None:
+    if membership is None or membership.organization_id != organization_id:
         raise MissingResourceError("Collection membership not found.")
     await session.delete(membership)
     await session.commit()
 
 
 async def list_collection_tools(
-    session: AsyncSession, collection_id: UUID, limit: int, offset: int
+    session: AsyncSession, organization_id: UUID, collection_id: UUID, limit: int, offset: int
 ) -> list[Tool]:
-    collection = await get_collection(session, collection_id)
+    collection = await get_collection(session, organization_id, collection_id)
     if not collection.enabled:
         return []
-    query = (
-        select(Tool)
-        .join(CollectionMembership, CollectionMembership.server_id == Tool.server_id)
-        .where(
-            CollectionMembership.collection_id == collection_id,
-            CollectionMembership.enabled.is_(True),
-            Tool.active.is_(True),
-        )
-        .order_by(Tool.name, Tool.server_id, Tool.id)
-        .limit(limit)
-        .offset(offset)
+    return list(
+        (
+            await session.scalars(
+                select(Tool)
+                .join(CollectionMembership, CollectionMembership.server_id == Tool.server_id)
+                .where(
+                    CollectionMembership.collection_id == collection_id,
+                    CollectionMembership.organization_id == organization_id,
+                    CollectionMembership.enabled.is_(True),
+                    Tool.active.is_(True),
+                )
+                .order_by(Tool.name, Tool.server_id, Tool.id)
+                .limit(limit)
+                .offset(offset)
+            )
+        ).all()
     )
-    return list((await session.scalars(query)).all())

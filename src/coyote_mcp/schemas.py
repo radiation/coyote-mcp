@@ -80,3 +80,25 @@ class CollectionResponse(BaseModel):
 
 class CollectionDetailResponse(CollectionResponse):
     memberships: list[MembershipResponse]
+
+
+class PATCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    scopes: set[str] = Field(min_length=1)
+    lifetime_seconds: int = Field(ge=1)
+
+
+class PATResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    name: str
+    scopes: list[str]
+    expires_at: datetime
+    created_at: datetime
+    last_used_at: datetime | None
+    revoked_at: datetime | None
+
+
+class PATCreatedResponse(PATResponse):
+    token: str

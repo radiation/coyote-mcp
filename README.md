@@ -29,11 +29,73 @@ Visit `http://localhost:8000/healthz`. MCP is mounted at `/mcp/`.
 Alembic configuration is in the repository-root `alembic.ini`; the environment
 and revision scripts are under `alembic/` and `alembic/versions/`.
 
+## Phase 2A authentication and authorization
+
+Phase 2A introduces one configured organization boundary. The `0004` migration
+creates the `default` organization and assigns every existing server, collection,
+tool membership, principal, role assignment, and credential to it. Existing
+installations must apply the migration before starting the app:
+
+```bash
+uv run alembic upgrade head
+```
+
+No privileged credential is created during startup or migration. Bootstrap the
+initial owner once, after migrations complete:
+
+```bash
+uv run coyote-mcp bootstrap-admin
+# Or in Compose:
+docker compose run --rm app uv run coyote-mcp bootstrap-admin
+```
+
+The command prints a bearer token exactly once and refuses to generate another
+owner or bootstrap token after success. Store it in an approved secret manager.
+Lost administrator access requires a deliberate break-glass database recovery
+performed by an operator: create or re-enable a principal, assign `owner` within
+the configured organization, and issue a replacement credential through the
+same audited operational procedure. There is no application backdoor.
+
+All `/api/v1` catalog and management endpoints now require a PAT:
+
+```bash
+curl http://localhost:8000/api/v1/servers \
+  -H "Authorization: Bearer $COYOTE_PAT"
+```
+
+Create and display a new PAT once using an existing credential:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/me/pats \
+  -H "Authorization: Bearer $COYOTE_PAT" \
+  -H 'content-type: application/json' \
+  -d '{"name":"ci","scopes":["server:read","tool:discover"],"lifetime_seconds":2592000}'
+```
+
+PATs are opaque `coyote_pat_` bearer tokens. Only a SHA-256 verifier is stored;
+tokens have a required, configurable maximum lifetime (90 days by default), and
+are rejected immediately after expiry, revocation, or principal disablement.
+Requested scopes are attenuated against the principal's role permissions.
+
+Built-in roles are `owner`, `administrator`, `maintainer`, `consumer`, and
+`viewer`. Owners manage every action, administrators manage all operational
+actions except policy management, maintainers manage registry and collections,
+consumers discover/describe/execute tools, and viewers discover/describe tools.
+Assignments can be organization-wide or collection-scoped. Collection-scoped
+assignments grant permissions only for that collection and never organization-wide
+server management. Authorization defaults to deny; hidden cross-organization
+resources return 404.
+
+FastMCP protocol endpoints are deliberately disabled with `503` in this phase,
+because the protocol adapter cannot yet enforce the shared policy layer. Health
+checks remain unauthenticated. Phase 2A does not include OIDC, group
+synchronization, OAuth token exchange, ABAC/policy DSLs, administration UI, or
+MCP tool execution routing.
+
 ## Registry and catalog
 
-The REST API is development-bound to `127.0.0.1:8000` by Compose. Authentication
-and authorization are deliberately not part of this phase, so do not expose its
-administrative routes publicly.
+The REST API is development-bound to `127.0.0.1:8000` by Compose. It requires
+an authenticated, authorized PAT even in development.
 
 Register a Streamable HTTP MCP server (registration does not contact the server):
 
