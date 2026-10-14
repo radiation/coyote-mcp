@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from datetime import timedelta
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -14,11 +15,12 @@ from coyote_mcp.settings import Settings
 
 async def credentials(session_factory: async_sessionmaker[AsyncSession]) -> dict[str, str]:
     async with session_factory() as session:
-        organization = Organization(slug="api", display_name="API")
+        suffix = uuid4().hex
+        organization = Organization(slug=f"api-{suffix}", display_name="API")
         session.add(organization)
         await session.flush()
         principal = Principal(
-            organization_id=organization.id, identifier="tester", display_name="Tester"
+            organization_id=organization.id, identifier=f"tester-{suffix}", display_name="Tester"
         )
         session.add(principal)
         await session.flush()

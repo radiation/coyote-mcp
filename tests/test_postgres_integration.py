@@ -13,7 +13,7 @@ from coyote_mcp.discovery import (
     DiscoveryService,
     SyncSupersededError,
 )
-from coyote_mcp.models import MCPServer, Tool
+from coyote_mcp.models import MCPServer, Organization, Tool
 from coyote_mcp.schemas import ServerCreate
 from coyote_mcp.settings import Settings
 
@@ -28,10 +28,10 @@ async def postgres_sessions() -> AsyncIterator[async_sessionmaker[AsyncSession]]
     engine = create_async_engine(POSTGRES_INTEGRATION_URL)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as connection:
-        await connection.execute(text("TRUNCATE collection_servers, tools, collections, servers"))
+        await connection.execute(text("TRUNCATE organizations CASCADE"))
     yield sessions
     async with engine.begin() as connection:
-        await connection.execute(text("TRUNCATE collection_servers, tools, collections, servers"))
+        await connection.execute(text("TRUNCATE organizations CASCADE"))
     await engine.dispose()
 
 
@@ -59,8 +59,11 @@ async def test_postgres_migration_and_jsonb_persistence(
 ) -> None:
     async with postgres_sessions() as session:
         revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
-        assert revision == "0003"
-        server = await catalog.create_server(session, server_request())
+        assert revision == "0005"
+        organization = Organization(slug="postgres", display_name="PostgreSQL")
+        session.add(organization)
+        await session.commit()
+        server = await catalog.create_server(session, organization.id, server_request())
         tool = Tool(
             server_id=server.id,
             name="jsonb",
@@ -85,7 +88,10 @@ async def test_postgres_unique_tool_constraint(
     postgres_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     async with postgres_sessions() as session:
-        server = await catalog.create_server(session, server_request())
+        organization = Organization(slug="postgres", display_name="PostgreSQL")
+        session.add(organization)
+        await session.commit()
+        server = await catalog.create_server(session, organization.id, server_request())
         for fingerprint in ("a" * 64, "b" * 64):
             session.add(
                 Tool(
@@ -122,13 +128,16 @@ async def test_postgres_concurrent_sync_rejects_stale_result(
     postgres_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     async with postgres_sessions() as setup_session:
-        server = await catalog.create_server(setup_session, server_request())
+        organization = Organization(slug="postgres", display_name="PostgreSQL")
+        setup_session.add(organization)
+        await setup_session.commit()
+        server = await catalog.create_server(setup_session, organization.id, server_request())
     client = OrderedDiscoveryClient()
     service = DiscoveryService(client, Settings())
 
     async def sync_once() -> MCPServer:
         async with postgres_sessions() as session:
-            server_for_sync = await catalog.get_server(session, server.id)
+            server_for_sync = await catalog.get_server(session, organization.id, server.id)
             return await service.sync(session, server_for_sync)
 
     first_sync = asyncio.create_task(sync_once())
@@ -139,7 +148,7 @@ async def test_postgres_concurrent_sync_rejects_stale_result(
         await first_sync
 
     async with postgres_sessions() as verify_session:
-        tools = await catalog.list_server_tools(verify_session, server.id, 50, 0)
+        tools = await catalog.list_server_tools(verify_session, organization.id, server.id, 50, 0)
 
     assert second_result.status == "ready"
     assert [tool.name for tool in tools] == ["current"]
