@@ -360,7 +360,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.15" },
     { name = "asyncpg", specifier = ">=0.30" },
     { name = "fastapi", specifier = ">=0.115" },
-    { name = "fastmcp", specifier = ">=3,<4" },
+    { name = "fastmcp", specifier = ">=3,<5" },
     { name = "jinja2", specifier = ">=3.1" },
     { name = "pydantic", specifier = ">=2.10" },
     { name = "pydantic-settings", specifier = ">=2.8" },
