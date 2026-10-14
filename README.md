@@ -83,13 +83,48 @@ uv run mypy src/
 uv run pytest
 ```
 
-To run the optional PostgreSQL integration suite against the Compose database
-after `docker compose up --build -d`:
+GitHub Actions runs the same lint, formatting, strict type-checking, Alembic
+migration, and full test suite on pushes to `main`, pull requests targeting
+`main`, and manual dispatches. It uses Python 3.14 and a health-checked pgvector
+PostgreSQL service. CI validates only; it does not run the auto-fixing hooks.
+
+### Coverage
+
+CI collects branch coverage for `coyote_mcp`, prints missing lines in the terminal
+report, writes `coverage.xml`, and requires at least **80%** coverage. The XML
+report is uploaded as a workflow artifact, including after a test failure when it
+was generated. Reproduce the coverage check locally with:
 
 ```bash
+uv run pytest --cov=coyote_mcp --cov-report=term-missing --cov-report=xml
+```
+
+### PostgreSQL integration tests
+
+To run the PostgreSQL integration suite locally, start the database, apply
+migrations, then explicitly provide its URL. The URL is required so these tests
+cannot be mistaken for normal SQLite unit tests:
+
+```bash
+docker compose up -d postgres
+DATABASE_URL='postgresql+asyncpg://coyote:localdev-only@127.0.0.1:5432/coyote_mcp' \
+  uv run alembic upgrade head
 POSTGRES_INTEGRATION_URL='postgresql+asyncpg://coyote:localdev-only@127.0.0.1:5432/coyote_mcp' \
   uv run pytest tests/test_postgres_integration.py
 ```
+
+### Dependency updates and branch protection
+
+Dependabot checks Python dependencies (from `pyproject.toml` and the committed
+`uv.lock`), GitHub Actions, and Docker images weekly. Python minor and patch
+updates are grouped; major Python dependency updates remain separate. GitHub
+Actions and Docker updates are grouped separately, while Dependabot security
+updates retain their normal urgent handling.
+
+To protect `main`, a repository administrator should open **Settings > Branches >
+Add branch protection rule**, target `main`, require pull requests before merging,
+and enable **Require status checks to pass before merging**. Select the `Validate`
+CI status check as required (and optionally require the branch to be up to date).
 
 ## Explicitly not implemented yet
 

@@ -22,10 +22,12 @@ dev = [
   "mypy>=1.18",
   "pytest>=8.3",
   "pytest-asyncio>=1.0",
+  "pytest-cov>=7.1",
   "httpx>=0.28",
   "pre-commit>=4.0",
   "types-requests>=2.32",
   "aiosqlite>=0.22.1",
+  "pytest-cov>=7.1.0",
 ]
 
 [build-system]
@@ -54,4 +56,24 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
   "postgres: requires a PostgreSQL database migrated by Alembic",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["coyote_mcp"]
+omit = [
+  "tests/*",
+  "alembic/*",
+  "*/migrations/*",
+  "*/generated/*",
+]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+omit = [
+  "tests/*",
+  "alembic/*",
+  "*/migrations/*",
+  "*/generated/*",
 ]
