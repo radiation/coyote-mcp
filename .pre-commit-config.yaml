@@ -1,0 +1,30 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: Ruff lint (auto-fix)
+        entry: uv run ruff check --fix
+        language: system
+        types_or: [python, pyi]
+        stages: [pre-commit]
+
+      - id: ruff-format
+        name: Ruff format (auto-fix)
+        entry: uv run ruff format
+        language: system
+        types_or: [python, pyi]
+        stages: [pre-commit]
+
+      - id: mypy
+        name: Mypy strict type checking
+        entry: uv run mypy src/
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: pytest
+        name: Pytest
+        entry: uv run pytest
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

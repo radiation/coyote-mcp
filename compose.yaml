@@ -1,0 +1,46 @@
+x-app: &app
+  build: .
+  image: coyote-mcp:local
+  working_dir: /app
+  environment:
+    DATABASE_URL: postgresql+asyncpg://coyote:localdev-only@postgres:5432/coyote_mcp
+    PYTHONPATH: /app/src
+  volumes:
+    - ./src:/app/src
+    - ./alembic:/app/alembic
+    - ./alembic.ini:/app/alembic.ini
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: coyote_mcp
+      POSTGRES_USER: coyote
+      POSTGRES_PASSWORD: localdev-only
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coyote -d coyote_mcp"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  migrate:
+    <<: *app
+    command: ["uv", "run", "alembic", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+  app:
+    <<: *app
+    command:
+      ["uv", "run", "uvicorn", "coyote_mcp.app:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+volumes:
+  pgdata:
