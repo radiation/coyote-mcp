@@ -146,7 +146,7 @@ async def issue_pat(
         raise ValueError("Token scopes must contain recognized actions.")
     if lifetime <= timedelta() or lifetime > timedelta(seconds=settings.pat_max_lifetime_seconds):
         raise ValueError("Token lifetime exceeds the configured maximum.")
-    token_id = secrets.token_urlsafe(12)
+    token_id = secrets.token_hex(12)
     secret = secrets.token_urlsafe(32)
     plaintext = f"coyote_pat_{token_id}_{secret}"
     token = PersonalAccessToken(

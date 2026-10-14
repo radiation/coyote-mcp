@@ -67,7 +67,10 @@ class MCPServer(Base):
         back_populates="server", cascade="all, delete-orphan", passive_deletes=True
     )
     memberships: Mapped[list[CollectionMembership]] = relationship(
-        back_populates="server", cascade="all, delete-orphan", passive_deletes=True
+        back_populates="server",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        overlaps="collection,memberships",
     )
 
 
@@ -115,7 +118,10 @@ class Collection(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
     memberships: Mapped[list[CollectionMembership]] = relationship(
-        back_populates="collection", cascade="all, delete-orphan", passive_deletes=True
+        back_populates="collection",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        overlaps="memberships,server",
     )
 
 
@@ -141,8 +147,12 @@ class CollectionMembership(Base):
         ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
     )
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    collection: Mapped[Collection] = relationship(back_populates="memberships")
-    server: Mapped[MCPServer] = relationship(back_populates="memberships")
+    collection: Mapped[Collection] = relationship(
+        back_populates="memberships", overlaps="memberships,server"
+    )
+    server: Mapped[MCPServer] = relationship(
+        back_populates="memberships", overlaps="collection,memberships"
+    )
 
 
 class Principal(Base):

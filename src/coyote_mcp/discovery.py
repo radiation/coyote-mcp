@@ -123,8 +123,8 @@ class FastMCPDiscoveryClient:
             DiscoveredTool(
                 name=tool.name,
                 description=tool.description or "",
-                input_schema=dict(tool.inputSchema),
-                output_schema=dict(tool.outputSchema) if tool.outputSchema is not None else None,
+                input_schema=dict(tool.input_schema),
+                output_schema=dict(tool.output_schema) if tool.output_schema is not None else None,
                 annotations=tool.annotations.model_dump(exclude_none=True)
                 if tool.annotations is not None
                 else {},
