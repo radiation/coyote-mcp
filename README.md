@@ -1,5 +1,8 @@
 # coyote-mcp
 
+[![CI](https://github.com/radiation/coyote-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/radiation/coyote-mcp/actions/workflows/ci.yml)
+[![Codecov](https://codecov.io/gh/radiation/coyote-mcp/graph/badge.svg)](https://codecov.io/gh/radiation/coyote-mcp)
+
 Collection-aware enterprise MCP gateway. Phase 1 persists downstream server
 registrations, discovers their advertised tools, and exposes a PostgreSQL-backed
 catalog grouped into collections.
@@ -153,9 +156,18 @@ PostgreSQL service. CI validates only; it does not run the auto-fixing hooks.
 ### Coverage
 
 CI collects branch coverage for `coyote_mcp`, prints missing lines in the terminal
-report, writes `coverage.xml`, and requires at least **80%** coverage. The XML
-report is uploaded as a workflow artifact, including after a test failure when it
-was generated. Reproduce the coverage check locally with:
+report, writes `coverage.xml` and `junit.xml`, and requires at least **80%**
+coverage. Both reports are uploaded as workflow artifacts when available,
+including after a test failure. A non-blocking GitHub check publishes JUnit
+results when `checks: write` is available, and the workflow summary records the
+test outcome and coverage percentage.
+
+Codecov uploads `coverage.xml` only when the `CODECOV_TOKEN` Actions secret is
+available; configure the same secret as a Dependabot secret to report Dependabot
+pull requests. This avoids exposing credentials to untrusted fork pull requests,
+which still run tests and upload artifacts. Codecov project coverage is enforced
+at 80%; patch coverage is initially informational. Reproduce the coverage check
+locally with:
 
 ```bash
 uv run pytest --cov=coyote_mcp --cov-report=term-missing --cov-report=xml
