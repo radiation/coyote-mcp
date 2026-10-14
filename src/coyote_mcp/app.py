@@ -2,6 +2,8 @@ from fastapi import FastAPI
 from fastmcp import FastMCP
 from pydantic import BaseModel
 
+from coyote_mcp.api import router as api_router
+
 
 class HealthResponse(BaseModel):
     status: str
@@ -19,6 +21,7 @@ async def gateway_info() -> str:
 mcp_app = mcp.http_app(path="/")
 app = FastAPI(title="coyote-mcp", lifespan=mcp_app.lifespan)
 app.mount("/mcp", mcp_app)
+app.include_router(api_router)
 
 
 @app.get("/healthz", response_model=HealthResponse)

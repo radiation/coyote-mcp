@@ -24,7 +24,8 @@ dev = [
   "pytest-asyncio>=1.0",
   "httpx>=0.28",
   "pre-commit>=4.0",
-  "types-requests>=2.32"
+  "types-requests>=2.32",
+  "aiosqlite>=0.22.1",
 ]
 
 [build-system]
@@ -51,3 +52,6 @@ packages = ["coyote_mcp"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+  "postgres: requires a PostgreSQL database migrated by Alembic",
+]

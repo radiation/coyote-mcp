@@ -3,6 +3,7 @@ from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import pool
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from coyote_mcp.models import Base
@@ -25,6 +26,12 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def run_migrations(connection: Connection) -> None:
+    context.configure(connection=connection, target_metadata=target_metadata)
+    with context.begin_transaction():
+        context.run_migrations()
+
+
 async def run_async_migrations() -> None:
     engine = async_engine_from_config(
         config.get_section(config.config_ini_section, {}),
@@ -32,10 +39,7 @@ async def run_async_migrations() -> None:
         poolclass=pool.NullPool,
     )
     async with engine.connect() as connection:
-        await connection.run_sync(
-            lambda conn: context.configure(connection=conn, target_metadata=target_metadata)
-        )
-        await connection.run_sync(lambda conn: context.run_migrations())
+        await connection.run_sync(run_migrations)
     await engine.dispose()
 
 
