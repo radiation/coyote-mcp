@@ -109,10 +109,13 @@ An owner configures an OIDC provider through the control-plane API. Each
 organization currently has at most one enabled provider (the schema supports
 multiple provider records for a future selection policy). Configure its issuer,
 client ID, optional group claim, optional provider organization claim, and a
-secret reference such as `env:OKTA_COYOTE_CLIENT_SECRET`. The application stores
-only that reference; set the referenced environment variable in the deployment
-secret manager. It never persists raw client secrets, ID tokens, or refresh
-tokens.
+client-secret binding of `env:auto`. The application derives a provider- and
+organization-specific reference such as
+`env:COYOTE_OIDC_CLIENT_SECRET_<ORG_UUID>_<PROVIDER_UUID>`; an operator must
+populate that exact environment variable in the deployment secret manager.
+Arbitrary environment references are rejected, so an organization owner cannot
+cause another deployment secret to be sent to a token endpoint. The application
+never persists raw client secrets, ID tokens, or refresh tokens.
 
 Users begin login at `/auth/oidc/{organization-slug}/login`. The authorization
 code exchange uses PKCE S256, state, and nonce. Discovery metadata and JWKS are

@@ -6,7 +6,7 @@ import os
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -28,7 +28,7 @@ from coyote_mcp.db import get_session
 from coyote_mcp.discovery import PinnedDestinationTransport
 from coyote_mcp.models import IdentityProvider, OIDCLoginTransaction, Organization
 from coyote_mcp.security import UntrustedOIDCEndpointError, validate_oidc_endpoint
-from coyote_mcp.settings import Settings
+from coyote_mcp.settings import Settings, oidc_client_secret_reference
 
 router = APIRouter(prefix="/auth/oidc", tags=["oidc"])
 Session = Annotated[AsyncSession, Depends(get_session)]
@@ -72,10 +72,11 @@ def _delete_oidc_binding_cookie(response: Response, state: str) -> None:
     response.delete_cookie(_oidc_binding_cookie_name(state), path="/")
 
 
-def _secret(reference: str) -> str:
-    if not reference.startswith("env:"):
-        raise ValueError("OIDC client secrets must use an env: secret reference.")
-    value = os.environ.get(reference.removeprefix("env:"))
+def _secret(provider: IdentityProvider) -> str:
+    expected_reference = oidc_client_secret_reference(provider.organization_id, provider.id)
+    if provider.client_secret_reference != expected_reference:
+        raise ValueError("OIDC client secret binding is not approved.")
+    value = os.environ.get(expected_reference.removeprefix("env:"))
     if not value:
         raise ValueError("OIDC client secret reference is not configured.")
     return value
@@ -87,7 +88,7 @@ def _pkce_challenge(verifier: str) -> str:
 
 
 async def _discovery(provider: IdentityProvider) -> dict[str, Any]:
-    issuer = provider.issuer.rstrip("/")
+    issuer = provider.issuer
     discovery_endpoint = validate_oidc_endpoint(
         issuer, issuer, provider.trusted_endpoint_hosts, Settings()
     )
@@ -98,7 +99,7 @@ async def _discovery(provider: IdentityProvider) -> dict[str, Any]:
         trust_env=False,
     ) as client:
         response = await client.get(
-            f"{issuer}/.well-known/openid-configuration", follow_redirects=False
+            f"{issuer.rstrip('/')}/.well-known/openid-configuration", follow_redirects=False
         )
     response.raise_for_status()
     document = response.json()
@@ -115,10 +116,13 @@ async def _discovery(provider: IdentityProvider) -> dict[str, Any]:
 
 
 async def _exchange_code(
-    provider: IdentityProvider, token_endpoint: str, data: dict[str, str]
+    provider: IdentityProvider,
+    token_endpoint: str,
+    data: dict[str, str],
+    basic_auth: tuple[str, str] | None = None,
 ) -> dict[str, Any]:
     endpoint = validate_oidc_endpoint(
-        token_endpoint, provider.issuer.rstrip("/"), provider.trusted_endpoint_hosts, Settings()
+        token_endpoint, provider.issuer, provider.trusted_endpoint_hosts, Settings()
     )
     async with httpx.AsyncClient(
         timeout=Settings().oidc_discovery_timeout_seconds,
@@ -126,7 +130,10 @@ async def _exchange_code(
         transport=PinnedDestinationTransport(endpoint),
         trust_env=False,
     ) as client:
-        response = await client.post(token_endpoint, data=data)
+        if basic_auth is None:
+            response = await client.post(token_endpoint, data=data)
+        else:
+            response = await client.post(token_endpoint, data=data, auth=basic_auth)
     response.raise_for_status()
     payload = response.json()
     if not isinstance(payload, dict):
@@ -141,7 +148,7 @@ async def validate_id_token(
     if not isinstance(jwks_uri, str):
         raise ValueError("OIDC discovery metadata lacks JWKS.")
     endpoint = validate_oidc_endpoint(
-        jwks_uri, provider.issuer.rstrip("/"), provider.trusted_endpoint_hosts, Settings()
+        jwks_uri, provider.issuer, provider.trusted_endpoint_hosts, Settings()
     )
     async with httpx.AsyncClient(
         timeout=Settings().oidc_discovery_timeout_seconds,
@@ -177,7 +184,7 @@ async def validate_id_token(
         audiences = set(audience)
     else:
         raise ValueError("OIDC ID token audience is invalid.")
-    if payload.get("iss") != provider.issuer.rstrip("/") or provider.client_id not in audiences:
+    if payload.get("iss") != provider.issuer or provider.client_id not in audiences:
         raise ValueError("OIDC ID token issuer or audience is invalid.")
     if len(audiences) > 1 and payload.get("azp") != provider.client_id:
         raise ValueError("OIDC ID token authorized party is invalid.")
@@ -237,8 +244,9 @@ async def login(organization_slug: str, request: Request, session: Session) -> R
             "code_challenge_method": "S256",
         }
     )
+    delimiter = "&" if urlsplit(authorization_endpoint).query else "?"
     response = RedirectResponse(
-        f"{authorization_endpoint}?{query}", status_code=status.HTTP_302_FOUND
+        f"{authorization_endpoint}{delimiter}{query}", status_code=status.HTTP_302_FOUND
     )
     _set_oidc_binding_cookie(response, state, browser_binding)
     return response
@@ -283,18 +291,42 @@ async def callback(request: Request, code: str, state: str, session: Session) ->
     token_endpoint = discovery.get("token_endpoint")
     if not isinstance(token_endpoint, str):
         raise HTTPException(status_code=502, detail="OIDC provider is missing a token endpoint.")
+    advertised_auth_methods = discovery.get("token_endpoint_auth_methods_supported")
+    if advertised_auth_methods is None:
+        auth_method = "client_secret_basic"
+    elif (
+        isinstance(advertised_auth_methods, list)
+        and all(isinstance(method, str) for method in advertised_auth_methods)
+        and "client_secret_basic" in advertised_auth_methods
+    ):
+        auth_method = "client_secret_basic"
+    elif (
+        isinstance(advertised_auth_methods, list)
+        and all(isinstance(method, str) for method in advertised_auth_methods)
+        and "client_secret_post" in advertised_auth_methods
+    ):
+        auth_method = "client_secret_post"
+    else:
+        raise HTTPException(
+            status_code=502,
+            detail="OIDC provider does not support a configured client authentication method.",
+        )
     try:
+        client_secret = _secret(provider)
+        token_request = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": str(request.url_for("oidc_callback")),
+            "code_verifier": pkce_verifier,
+        }
+        if auth_method == "client_secret_post":
+            token_request["client_id"] = provider.client_id
+            token_request["client_secret"] = client_secret
         token_response = await _exchange_code(
             provider,
             token_endpoint,
-            {
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": str(request.url_for("oidc_callback")),
-                "client_id": provider.client_id,
-                "client_secret": _secret(provider.client_secret_reference),
-                "code_verifier": pkce_verifier,
-            },
+            token_request,
+            (provider.client_id, client_secret) if auth_method == "client_secret_basic" else None,
         )
     except (httpx.HTTPError, UntrustedOIDCEndpointError, ValueError) as error:
         raise HTTPException(status_code=502, detail="OIDC token exchange failed.") from error
@@ -319,7 +351,7 @@ async def callback(request: Request, code: str, state: str, session: Session) ->
         principal = await resolve_external_identity(
             session,
             organization_id=provider.organization_id,
-            issuer=provider.issuer.rstrip("/"),
+            issuer=provider.issuer,
             subject=claims["sub"],
             email=claims.get("email") if isinstance(claims.get("email"), str) else None,
             display_name=claims.get("name") if isinstance(claims.get("name"), str) else None,
@@ -327,6 +359,12 @@ async def callback(request: Request, code: str, state: str, session: Session) ->
         )
     except ValueError as error:
         raise HTTPException(status_code=401, detail="OIDC identity validation failed.") from error
+    existing_session = await authenticate_browser_session(
+        session, request.cookies.get(Settings().browser_session_cookie_name, "")
+    )
+    if existing_session is not None and existing_session.browser_session is not None:
+        existing_session.browser_session.revoked_at = datetime.now(UTC)
+        await session.commit()
     _, session_token = await issue_browser_session(
         session, principal, [] if incomplete else groups_value, provider.id, Settings()
     )

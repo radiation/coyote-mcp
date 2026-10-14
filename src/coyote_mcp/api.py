@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -54,7 +54,7 @@ from coyote_mcp.schemas import (
     ToolResponse,
 )
 from coyote_mcp.security import UnsafeEndpointError, validate_endpoint
-from coyote_mcp.settings import Settings
+from coyote_mcp.settings import Settings, oidc_client_secret_reference
 
 router = APIRouter(prefix="/api/v1")
 Session = Annotated[AsyncSession, Depends(get_session)]
@@ -374,7 +374,7 @@ async def create_service_principal(
     request: ServicePrincipalCreate, session: Session, current: Current
 ) -> PrincipalResponse:
     await require_identity_administrator(session, current)
-    actor_permissions = await effective_permissions(
+    actor_permissions = current.scopes & await effective_permissions(
         session, current.principal, current.verified_group_ids, current.identity_provider_id
     )
     requested_permissions = frozenset().union(*(ROLE_PERMISSIONS[role] for role in request.roles))
@@ -387,16 +387,16 @@ async def create_service_principal(
         identity_type="service",
     )
     session.add(principal)
-    await session.flush()
-    session.add_all(
-        [
-            RoleAssignment(
-                organization_id=principal.organization_id, principal_id=principal.id, role=role
-            )
-            for role in request.roles
-        ]
-    )
     try:
+        await session.flush()
+        session.add_all(
+            [
+                RoleAssignment(
+                    organization_id=principal.organization_id, principal_id=principal.id, role=role
+                )
+                for role in request.roles
+            ]
+        )
         await session.commit()
     except IntegrityError as error:
         await session.rollback()
@@ -442,7 +442,7 @@ async def issue_service_pat(
     principal = await service_principal_or_404(
         session, current.principal.organization_id, principal_id
     )
-    actor_permissions = await effective_permissions(
+    actor_permissions = current.scopes & await effective_permissions(
         session, current.principal, current.verified_group_ids, current.identity_provider_id
     )
     if not request.scopes.issubset(actor_permissions):
@@ -487,12 +487,21 @@ async def create_identity_provider(
     request: IdentityProviderCreate, session: Session, current: Current
 ) -> dict[str, str]:
     await require_identity_administrator(session, current)
+    if request.client_secret_reference != "env:auto":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="OIDC client secrets must use the operator-managed env:auto binding.",
+        )
+    provider_id = uuid4()
     provider = IdentityProvider(
+        id=provider_id,
         organization_id=current.principal.organization_id,
         name=request.name,
-        issuer=str(request.issuer).rstrip("/"),
+        issuer=str(request.issuer),
         client_id=request.client_id,
-        client_secret_reference=request.client_secret_reference,
+        client_secret_reference=oidc_client_secret_reference(
+            current.principal.organization_id, provider_id
+        ),
         allowed_organization=request.allowed_organization,
         group_claim=request.group_claim,
         trusted_endpoint_hosts=request.trusted_endpoint_hosts,

@@ -89,6 +89,11 @@ def _hash_secret(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 
+def _external_principal_identifier(issuer: str, subject: str) -> str:
+    digest = hashlib.sha256(f"{issuer}\x00{subject}".encode()).hexdigest()
+    return f"oidc:{digest}"
+
+
 def _token_parts(value: str) -> tuple[str, str] | None:
     if not value.startswith("coyote_pat_"):
         return None
@@ -232,7 +237,17 @@ async def issue_pat(
 ) -> tuple[PersonalAccessToken, str]:
     if not principal.enabled:
         raise ValueError("Disabled principals cannot receive credentials.")
-    principal_permissions = await effective_permissions(session, principal)
+    assignments = (
+        await session.scalars(
+            select(RoleAssignment).where(
+                RoleAssignment.principal_id == principal.id,
+                RoleAssignment.organization_id == principal.organization_id,
+            )
+        )
+    ).all()
+    principal_permissions = frozenset().union(
+        *(ROLE_PERMISSIONS.get(assignment.role, frozenset()) for assignment in assignments)
+    )
     if not scopes or not scopes.issubset(principal_permissions):
         raise ValueError("Token scopes must contain recognized actions.")
     if lifetime <= timedelta() or lifetime > timedelta(seconds=settings.pat_max_lifetime_seconds):
@@ -312,7 +327,7 @@ async def resolve_external_identity(
             raise ValueError("No external identity is registered for this account.")
         principal = Principal(
             organization_id=organization_id,
-            identifier=f"oidc:{issuer}:{subject}",
+            identifier=_external_principal_identifier(issuer, subject),
             display_name=display_name or email or subject,
             identity_type="human",
             enabled=True,

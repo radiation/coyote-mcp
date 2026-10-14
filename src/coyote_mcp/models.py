@@ -383,6 +383,7 @@ class ExternalGroup(Base):
             "external_id",
             name="uq_external_groups_org_provider_external_id",
         ),
+        UniqueConstraint("id", "organization_id", name="uq_external_groups_id_organization_id"),
         UniqueConstraint(
             "id",
             "organization_id",

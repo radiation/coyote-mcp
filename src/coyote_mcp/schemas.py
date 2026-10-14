@@ -131,7 +131,7 @@ class IdentityProviderCreate(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     issuer: HttpUrl
     client_id: str = Field(min_length=1, max_length=512)
-    client_secret_reference: str = Field(min_length=5, max_length=255, pattern=r"^env:[A-Z0-9_]+$")
+    client_secret_reference: str = Field(pattern=r"^env:auto$")
     allowed_organization: str | None = Field(default=None, max_length=255)
     group_claim: str | None = Field(default=None, max_length=128)
     trusted_endpoint_hosts: list[str] = Field(default_factory=list, max_length=20)

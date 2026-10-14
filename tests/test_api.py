@@ -153,6 +153,15 @@ async def test_service_principal_credentials_are_admin_managed(
                     "roles": ["viewer"],
                 },
             )
+            duplicate = await client.post(
+                "/api/v1/service-principals",
+                headers=headers,
+                json={
+                    "identifier": "automation",
+                    "display_name": "Automation",
+                    "roles": ["viewer"],
+                },
+            )
             principal_id = created.json()["id"]
             listed = await client.get("/api/v1/service-principals", headers=headers)
             issued = await client.post(
@@ -171,7 +180,7 @@ async def test_service_principal_credentials_are_admin_managed(
                     "name": "Corporate",
                     "issuer": "https://issuer.example",
                     "client_id": "client",
-                    "client_secret_reference": "env:CORPORATE_SECRET",
+                    "client_secret_reference": "env:auto",
                     "group_claim": "groups",
                     "jit_provisioning_enabled": True,
                 },
@@ -197,6 +206,7 @@ async def test_service_principal_credentials_are_admin_managed(
         app.dependency_overrides.clear()
 
     assert created.status_code == 201
+    assert duplicate.status_code == 409
     assert [principal["identifier"] for principal in listed.json()] == ["automation"]
     assert issued.status_code == 201
     assert identity_provider.status_code == 201
@@ -204,3 +214,77 @@ async def test_service_principal_credentials_are_admin_managed(
     assert disabled.status_code == 204
     async with session_factory() as session:
         assert await authenticate_token(session, issued.json()["token"]) is None
+
+
+@pytest.mark.asyncio
+async def test_scoped_owner_pat_cannot_delegate_unscoped_permissions(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        suffix = uuid4().hex
+        organization = Organization(slug=f"scoped-{suffix}", display_name="Scoped")
+        session.add(organization)
+        await session.flush()
+        owner = Principal(
+            organization_id=organization.id,
+            identifier=f"owner-{suffix}",
+            display_name="Owner",
+            enabled=True,
+        )
+        service = Principal(
+            organization_id=organization.id,
+            identifier=f"service-{suffix}",
+            display_name="Service",
+            identity_type="service",
+            enabled=True,
+        )
+        session.add_all([owner, service])
+        await session.flush()
+        session.add_all(
+            [
+                RoleAssignment(
+                    organization_id=organization.id, principal_id=owner.id, role="owner"
+                ),
+                RoleAssignment(
+                    organization_id=organization.id, principal_id=service.id, role="viewer"
+                ),
+            ]
+        )
+        await session.commit()
+        _, token = await issue_pat(
+            session, owner, "policy-only", {"policy:manage"}, timedelta(days=1), Settings()
+        )
+
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            headers = {"Authorization": f"Bearer {token}"}
+            delegated_owner = await client.post(
+                "/api/v1/service-principals",
+                headers=headers,
+                json={
+                    "identifier": f"escalated-{suffix}",
+                    "display_name": "Escalated",
+                    "roles": ["owner"],
+                },
+            )
+            broader_pat = await client.post(
+                f"/api/v1/service-principals/{service.id}/pats",
+                headers=headers,
+                json={
+                    "name": "broader",
+                    "scopes": ["server:read"],
+                    "lifetime_seconds": 3600,
+                },
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert delegated_owner.status_code == 403
+    assert broader_pat.status_code == 403

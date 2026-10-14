@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -20,7 +21,7 @@ from coyote_mcp.models import (
     Principal,
     RoleAssignment,
 )
-from coyote_mcp.settings import Settings
+from coyote_mcp.settings import Settings, oidc_client_secret_reference
 
 
 @pytest.mark.asyncio
@@ -31,12 +32,14 @@ async def test_oidc_authorization_code_flow_provisions_unprivileged_user(
         organization = Organization(slug="sso", display_name="SSO")
         session.add(organization)
         await session.flush()
+        provider_id = uuid4()
         provider = IdentityProvider(
+            id=provider_id,
             organization_id=organization.id,
             name="Test",
             issuer="https://issuer.example",
             client_id="client",
-            client_secret_reference="env:TEST_OIDC_SECRET",
+            client_secret_reference=oidc_client_secret_reference(organization.id, provider_id),
             group_claim="groups",
             jit_provisioning_enabled=True,
         )
@@ -60,9 +63,10 @@ async def test_oidc_authorization_code_flow_provisions_unprivileged_user(
     async def discovery(_: IdentityProvider) -> dict[str, object]:
         return {
             "issuer": "https://issuer.example",
-            "authorization_endpoint": "https://issuer.example/authorize",
+            "authorization_endpoint": "https://issuer.example/authorize?prompt=login",
             "token_endpoint": "https://issuer.example/token",
             "jwks_uri": "https://issuer.example/keys",
+            "token_endpoint_auth_methods_supported": ["client_secret_basic"],
         }
 
     async def validate(
@@ -75,14 +79,24 @@ async def test_oidc_authorization_code_flow_provisions_unprivileged_user(
             "groups": ["engineering"],
         }
 
-    async def exchange(_: IdentityProvider, __: str, ___: dict[str, str]) -> dict[str, object]:
+    async def exchange(
+        _: IdentityProvider,
+        __: str,
+        data: dict[str, str],
+        basic_auth: tuple[str, str] | None,
+    ) -> dict[str, object]:
+        assert "client_secret" not in data
+        assert basic_auth == ("client", "secret")
         return {"id_token": "validated-by-test"}
 
     async def override_session() -> AsyncIterator[AsyncSession]:
         async with session_factory() as session:
             yield session
 
-    monkeypatch.setenv("TEST_OIDC_SECRET", "secret")
+    monkeypatch.setenv(
+        oidc_client_secret_reference(organization.id, provider_id).removeprefix("env:"),
+        "secret",
+    )
     monkeypatch.setattr(oidc, "_discovery", discovery)
     monkeypatch.setattr(oidc, "validate_oidc_endpoint", lambda *args: None)
     monkeypatch.setattr(oidc, "validate_id_token", validate)
@@ -94,8 +108,12 @@ async def test_oidc_authorization_code_flow_provisions_unprivileged_user(
         ) as client:
             login = await client.get("/auth/oidc/sso/login")
             assert login.status_code == 302, login.text
-            state = parse_qs(urlparse(login.headers["location"]).query)["state"][0]
+            authorization_query = parse_qs(urlparse(login.headers["location"]).query)
+            state = authorization_query["state"][0]
             concurrent_login = await client.get("/auth/oidc/sso/login")
+            replacement_state = parse_qs(urlparse(concurrent_login.headers["location"]).query)[
+                "state"
+            ][0]
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as another_browser:
@@ -109,6 +127,10 @@ async def test_oidc_authorization_code_flow_provisions_unprivileged_user(
             callback = next(response for response in callbacks if response.status_code == 303)
             replayed_callback = next(
                 response for response in callbacks if response.status_code != 303
+            )
+            landing = await client.get(callback.headers["location"])
+            rotated_callback = await client.get(
+                f"/auth/oidc/callback?code=replacement&state={replacement_state}"
             )
             csrf = await client.get("/auth/oidc/csrf")
             session_read = await client.get("/api/v1/servers")
@@ -137,6 +159,10 @@ async def test_oidc_authorization_code_flow_provisions_unprivileged_user(
         app.dependency_overrides.clear()
 
     assert callback.status_code == 303
+    assert landing.status_code == 200
+    assert authorization_query["prompt"] == ["login"]
+    assert authorization_query["client_id"] == ["client"]
+    assert rotated_callback.status_code == 303
     assert concurrent_login.status_code == 302
     assert cross_browser_callback.status_code == 400
     assert replayed_callback.status_code == 400
@@ -148,17 +174,16 @@ async def test_oidc_authorization_code_flow_provisions_unprivileged_user(
     assert logout_without_csrf.status_code == 403
     async with session_factory() as session:
         principal = await session.scalar(
-            Principal.__table__.select().where(
-                Principal.identifier == "oidc:https://issuer.example:subject"
-            )
+            Principal.__table__.select().where(Principal.identifier.like("oidc:%"))
         )
     assert principal is not None
-    persisted = await session.scalar(select(BrowserSession))
-    assert persisted is not None
+    persisted = (await session.scalars(select(BrowserSession))).all()
+    assert len(persisted) == 2
+    assert sum(item.revoked_at is not None for item in persisted) == 1
     cookie_value = client.cookies.get(Settings().browser_session_cookie_name)
     assert cookie_value is not None
     assert "subject" not in cookie_value
-    assert cookie_value not in persisted.token_hash
+    assert all(cookie_value not in item.token_hash for item in persisted)
 
 
 @pytest.mark.asyncio
@@ -237,18 +262,26 @@ async def test_id_token_validation_checks_discovery_signature_and_claims(
 
 def test_oidc_secret_reference_and_pkce() -> None:
     assert oidc._pkce_challenge("verifier") != "verifier"
-    with pytest.raises(ValueError, match="env:"):
-        oidc._secret("vault:secret")
-    with pytest.raises(ValueError, match="not configured"):
-        oidc._secret("env:DOES_NOT_EXIST")
+    organization_id = uuid4()
+    provider = IdentityProvider(
+        id=uuid4(),
+        organization_id=organization_id,
+        name="Binding",
+        issuer="https://issuer.example",
+        client_id="client",
+        client_secret_reference="env:UNAPPROVED",
+    )
+    with pytest.raises(ValueError, match="not approved"):
+        oidc._secret(provider)
 
 
 @pytest.mark.asyncio
 async def test_oidc_discovery_and_token_exchange_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    requested_urls: list[str] = []
     provider = IdentityProvider(
         organization_id=Organization(slug="helpers", display_name="Helpers").id,
         name="Test",
-        issuer="https://issuer.example",
+        issuer="https://issuer.example/",
         client_id="client",
         client_secret_reference="env:TEST",
     )
@@ -260,11 +293,12 @@ async def test_oidc_discovery_and_token_exchange_helpers(monkeypatch: pytest.Mon
         async def __aexit__(self, *args: object) -> None:
             return None
 
-        async def get(self, _: str, **__: object) -> httpx.Response:
+        async def get(self, url: str, **__: object) -> httpx.Response:
+            requested_urls.append(url)
             return httpx.Response(
                 200,
                 json={
-                    "issuer": "https://issuer.example",
+                    "issuer": "https://issuer.example/",
                     "authorization_endpoint": "https://issuer.example/authorize",
                     "token_endpoint": "https://issuer.example/token",
                     "jwks_uri": "https://issuer.example/keys",
@@ -284,7 +318,8 @@ async def test_oidc_discovery_and_token_exchange_helpers(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(oidc.httpx, "AsyncClient", lambda **_: Client())
     monkeypatch.setattr(oidc, "validate_oidc_endpoint", lambda *args: None)
-    assert (await oidc._discovery(provider))["issuer"] == "https://issuer.example"
+    assert (await oidc._discovery(provider))["issuer"] == "https://issuer.example/"
+    assert requested_urls == ["https://issuer.example/.well-known/openid-configuration"]
     assert await oidc._exchange_code(
         provider, "https://issuer.example/token", {"code": "code"}
     ) == {"id_token": "token"}

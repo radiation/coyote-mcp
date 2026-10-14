@@ -118,6 +118,35 @@ async def test_collection_role_cannot_manage_organization_server(
 
 
 @pytest.mark.asyncio
+async def test_collection_scoped_role_can_issue_attenuated_pat(
+    session, organization: Organization
+) -> None:
+    collection = Collection(organization_id=organization.id, slug="execute", display_name="Execute")
+    principal = Principal(
+        organization_id=organization.id,
+        identifier="collection-user",
+        display_name="Collection User",
+    )
+    session.add_all([collection, principal])
+    await session.flush()
+    session.add(
+        RoleAssignment(
+            organization_id=organization.id,
+            principal_id=principal.id,
+            role="consumer",
+            collection_id=collection.id,
+        )
+    )
+    await session.commit()
+
+    token, _ = await issue_pat(
+        session, principal, "collection-execute", {"tool:execute"}, timedelta(days=1), Settings()
+    )
+
+    assert token.scopes == ["tool:execute"]
+
+
+@pytest.mark.asyncio
 async def test_external_identity_jit_does_not_link_matching_email(
     session, organization: Organization
 ) -> None:
@@ -147,6 +176,25 @@ async def test_external_identity_jit_does_not_link_matching_email(
     )
     assert resolved.id == provisioned.id
     assert resolved.display_name == "Updated"
+
+
+@pytest.mark.asyncio
+async def test_jit_provisioning_uses_bounded_identifier_for_long_subject(
+    session, organization: Organization
+) -> None:
+    subject = "subject-" + ("x" * 1024)
+    principal = await resolve_external_identity(
+        session,
+        organization_id=organization.id,
+        issuer="https://issuer.example/" + ("path/" * 40),
+        subject=subject,
+        email=None,
+        display_name=None,
+        jit_provisioning_enabled=True,
+    )
+
+    assert principal.identifier.startswith("oidc:")
+    assert len(principal.identifier) <= 255
 
 
 @pytest.mark.asyncio

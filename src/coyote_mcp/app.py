@@ -49,6 +49,11 @@ app.include_router(api_router)
 app.include_router(oidc_router)
 
 
+@app.get("/", include_in_schema=False)
+async def landing() -> dict[str, str]:
+    return {"status": "coyote-mcp"}
+
+
 @app.get("/healthz", response_model=HealthResponse)
 async def healthz() -> HealthResponse:
     return HealthResponse(status="ok")
