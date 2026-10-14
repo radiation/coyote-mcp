@@ -95,6 +95,89 @@ checks remain unauthenticated. Phase 2A does not include OIDC, group
 synchronization, OAuth token exchange, ABAC/policy DSLs, administration UI, or
 MCP tool execution routing.
 
+## Phase 2B enterprise identity
+
+Phase 2B adds organization-scoped OpenID Connect configuration, external identity
+bindings, verified-group role mappings, and managed service principals. Apply the
+additive migration before configuring an identity provider:
+
+```bash
+uv run alembic upgrade head
+```
+
+An owner configures an OIDC provider through the control-plane API. Each
+organization currently has at most one enabled provider (the schema supports
+multiple provider records for a future selection policy). Configure its issuer,
+client ID, optional group claim, optional provider organization claim, and a
+secret reference such as `env:OKTA_COYOTE_CLIENT_SECRET`. The application stores
+only that reference; set the referenced environment variable in the deployment
+secret manager. It never persists raw client secrets, ID tokens, or refresh
+tokens.
+
+Users begin login at `/auth/oidc/{organization-slug}/login`. The authorization
+code exchange uses PKCE S256, state, and nonce. Discovery metadata and JWKS are
+retrieved from the configured issuer; the application validates signature,
+issuer, audience, expiry, subject, and nonce before establishing a session.
+Production deployments must set `ENVIRONMENT` to a non-development value and
+provide a high-entropy `SESSION_SECRET_KEY` of at least 32 characters; startup
+rejects the development fallback secret outside development. Session cookies then
+require HTTPS, are HTTP-only, and use `SameSite=Lax`. Browser session mutations,
+including logout, require the `X-CSRF-Token` value stored in the session. Bearer
+authentication takes precedence whenever an `Authorization` header is present:
+an invalid bearer token returns `401` and never falls back to a browser session.
+The session is not accepted by MCP:
+`/mcp` remains blocked until protocol-specific policy enforcement exists.
+
+External accounts are bound immutably by `(organization, issuer, subject)`.
+Email is display metadata only and is never used to link accounts. Set
+`jit_provisioning_enabled` only when first-login provisioning is intended:
+provisioned humans receive no roles. Disabled mapped principals cannot log in.
+
+External group IDs come only from the validated ID-token group claim. Map a
+stable provider group ID to one or more built-in roles at organization or
+collection scope; direct principal assignments continue to work alongside those
+mappings. Group-derived access is evaluated for the authenticated session only.
+If the provider signals overage/incomplete claims or the configured group claim
+is absent/malformed, group-derived access fails closed; direct assignments are
+unaffected. Changes take effect at the next successful login or session expiry
+(eight hours by default), so administrators should use short session lifetimes
+where group removal must take effect quickly. Browser sessions are persisted in
+PostgreSQL and the cookie contains only an opaque, hashed-verifier token; it
+contains no principal details, group IDs, CSRF material, or OIDC tokens. Sessions
+expire, update activity on use, rotate on successful login, are revoked on
+logout, and are rejected immediately when their principal is disabled. OIDC
+state, nonce, and PKCE verifier are stored in a separate short-lived,
+single-use transaction that is atomically consumed by the callback and bound to
+an initiating-browser HttpOnly cookie. This prevents a callback initiated in one
+browser from establishing a session in another. Session activity is persisted at
+most once every five minutes while expiry and revocation are checked on every
+request. Obtain a
+fresh CSRF value from `GET /auth/oidc/csrf` before session-authenticated
+state-changing requests. SCIM and directory synchronization are deliberately
+deferred.
+
+OIDC discovery, authorization, token, and JWKS URLs must be HTTPS unless both
+development mode and explicit local OIDC overrides are enabled. Every endpoint
+must resolve to a public address (unless the local override is set), redirects
+are disabled, requests are DNS-pinned, and endpoints must use the issuer host or
+an explicitly configured `trusted_endpoint_hosts` entry. This prevents discovery
+metadata from redirecting credentials to an unrelated host while still allowing
+an approved enterprise provider boundary.
+
+External groups are identity-provider scoped. The same external group ID can be
+mapped separately for different providers, but a verified claim is evaluated
+only against mappings for the provider that authenticated the session. Legacy
+groups that cannot be unambiguously backfilled to one provider remain unbound
+and therefore grant no group-derived access.
+
+Owners can create, list, disable, and revoke scoped PATs for service principals.
+Service principals use `identity_type=service` and are distinct from user
+sessions. Credential scopes are constrained to the service principal's direct
+roles and the administering owner's effective permissions; no service-principal
+endpoint permits self-assignment or privilege escalation. OAuth client
+credentials, token exchange, and delegated workload execution are deferred to
+Phase 3.
+
 ## Registry and catalog
 
 The REST API is development-bound to `127.0.0.1:8000` by Compose. It requires

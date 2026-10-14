@@ -102,3 +102,48 @@ class PATResponse(BaseModel):
 
 class PATCreatedResponse(PATResponse):
     token: str
+
+
+class ServicePrincipalCreate(BaseModel):
+    identifier: str = Field(min_length=1, max_length=255, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    display_name: str = Field(min_length=1, max_length=255)
+    roles: set[Literal["owner", "administrator", "maintainer", "consumer", "viewer"]] = Field(
+        default_factory=set
+    )
+
+
+class PrincipalResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    identifier: str
+    display_name: str
+    identity_type: str
+    enabled: bool
+    created_at: datetime
+
+
+class ServicePATCreate(PATCreate):
+    pass
+
+
+class IdentityProviderCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    issuer: HttpUrl
+    client_id: str = Field(min_length=1, max_length=512)
+    client_secret_reference: str = Field(min_length=5, max_length=255, pattern=r"^env:[A-Z0-9_]+$")
+    allowed_organization: str | None = Field(default=None, max_length=255)
+    group_claim: str | None = Field(default=None, max_length=128)
+    trusted_endpoint_hosts: list[str] = Field(default_factory=list, max_length=20)
+    jit_provisioning_enabled: bool = False
+
+
+class ExternalGroupCreate(BaseModel):
+    identity_provider_id: UUID
+    external_id: str = Field(min_length=1, max_length=512)
+    display_name: str = Field(min_length=1, max_length=255)
+
+
+class GroupRoleMappingCreate(BaseModel):
+    role: Literal["owner", "administrator", "maintainer", "consumer", "viewer"]
+    collection_id: UUID | None = None

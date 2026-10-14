@@ -4,10 +4,17 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coyote_mcp import catalog
-from coyote_mcp.auth import AuthenticatedPrincipal, authorize, issue_pat
+from coyote_mcp.auth import (
+    ROLE_PERMISSIONS,
+    AuthenticatedPrincipal,
+    authorize,
+    effective_permissions,
+    issue_pat,
+)
 from coyote_mcp.db import get_session
 from coyote_mcp.dependencies import current_principal
 from coyote_mcp.discovery import (
@@ -16,19 +23,34 @@ from coyote_mcp.discovery import (
     SyncSupersededError,
     get_discovery_service,
 )
-from coyote_mcp.models import CollectionMembership, PersonalAccessToken
+from coyote_mcp.models import (
+    Collection,
+    CollectionMembership,
+    ExternalGroup,
+    GroupRoleMapping,
+    IdentityProvider,
+    PersonalAccessToken,
+    Principal,
+    RoleAssignment,
+)
 from coyote_mcp.schemas import (
     CollectionCreate,
     CollectionDetailResponse,
     CollectionResponse,
+    ExternalGroupCreate,
+    GroupRoleMappingCreate,
+    IdentityProviderCreate,
     MembershipCreate,
     MembershipResponse,
     Page,
     PATCreate,
     PATCreatedResponse,
     PATResponse,
+    PrincipalResponse,
     ServerCreate,
     ServerResponse,
+    ServicePATCreate,
+    ServicePrincipalCreate,
     ToolResponse,
 )
 from coyote_mcp.security import UnsafeEndpointError, validate_endpoint
@@ -63,7 +85,15 @@ async def require(
     context: dict[str, object] | None = (
         {"organization_id": current.principal.organization_id} if resource is None else None
     )
-    decision = await authorize(session, current.principal, action, resource, context)
+    decision = await authorize(
+        session,
+        current.principal,
+        action,
+        resource,
+        context,
+        current.verified_group_ids,
+        current.identity_provider_id,
+    )
     if not decision.allowed:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions."
@@ -315,3 +345,225 @@ async def revoke_pat(token_id: UUID, session: Session, current: Current) -> None
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found.")
     token.revoked_at = datetime.now(UTC)
     await session.commit()
+
+
+async def require_identity_administrator(
+    session: AsyncSession, current: AuthenticatedPrincipal
+) -> None:
+    await require(session, current, "policy:manage")
+
+
+@router.get("/service-principals", response_model=list[PrincipalResponse])
+async def list_service_principals(session: Session, current: Current) -> list[PrincipalResponse]:
+    await require_identity_administrator(session, current)
+    principals = await session.scalars(
+        select(Principal)
+        .where(
+            Principal.organization_id == current.principal.organization_id,
+            Principal.identity_type == "service",
+        )
+        .order_by(Principal.identifier)
+    )
+    return [PrincipalResponse.model_validate(principal) for principal in principals]
+
+
+@router.post(
+    "/service-principals", response_model=PrincipalResponse, status_code=status.HTTP_201_CREATED
+)
+async def create_service_principal(
+    request: ServicePrincipalCreate, session: Session, current: Current
+) -> PrincipalResponse:
+    await require_identity_administrator(session, current)
+    actor_permissions = await effective_permissions(
+        session, current.principal, current.verified_group_ids, current.identity_provider_id
+    )
+    requested_permissions = frozenset().union(*(ROLE_PERMISSIONS[role] for role in request.roles))
+    if not requested_permissions.issubset(actor_permissions):
+        raise HTTPException(status_code=403, detail="Cannot grant permissions you do not hold.")
+    principal = Principal(
+        organization_id=current.principal.organization_id,
+        identifier=request.identifier,
+        display_name=request.display_name,
+        identity_type="service",
+    )
+    session.add(principal)
+    await session.flush()
+    session.add_all(
+        [
+            RoleAssignment(
+                organization_id=principal.organization_id, principal_id=principal.id, role=role
+            )
+            for role in request.roles
+        ]
+    )
+    try:
+        await session.commit()
+    except IntegrityError as error:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="Service principal already exists.") from error
+    await session.refresh(principal)
+    return PrincipalResponse.model_validate(principal)
+
+
+async def service_principal_or_404(
+    session: AsyncSession, organization_id: UUID, principal_id: UUID
+) -> Principal:
+    principal = await session.scalar(
+        select(Principal).where(
+            Principal.id == principal_id,
+            Principal.organization_id == organization_id,
+            Principal.identity_type == "service",
+        )
+    )
+    if principal is None:
+        raise HTTPException(status_code=404, detail="Resource not found.")
+    return principal
+
+
+@router.post("/service-principals/{principal_id}/disable", status_code=status.HTTP_204_NO_CONTENT)
+async def disable_service_principal(principal_id: UUID, session: Session, current: Current) -> None:
+    await require_identity_administrator(session, current)
+    principal = await service_principal_or_404(
+        session, current.principal.organization_id, principal_id
+    )
+    principal.enabled = False
+    await session.commit()
+
+
+@router.post(
+    "/service-principals/{principal_id}/pats",
+    response_model=PATCreatedResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def issue_service_pat(
+    principal_id: UUID, request: ServicePATCreate, session: Session, current: Current
+) -> PATCreatedResponse:
+    await require_identity_administrator(session, current)
+    principal = await service_principal_or_404(
+        session, current.principal.organization_id, principal_id
+    )
+    actor_permissions = await effective_permissions(
+        session, current.principal, current.verified_group_ids, current.identity_provider_id
+    )
+    if not request.scopes.issubset(actor_permissions):
+        raise HTTPException(status_code=403, detail="Cannot issue broader credentials.")
+    try:
+        token, plaintext = await issue_pat(
+            session,
+            principal,
+            request.name,
+            request.scopes,
+            timedelta(seconds=request.lifetime_seconds),
+            Settings(),
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return PATCreatedResponse(**PATResponse.model_validate(token).model_dump(), token=plaintext)
+
+
+@router.delete(
+    "/service-principals/{principal_id}/pats/{token_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+async def revoke_service_pat(
+    principal_id: UUID, token_id: UUID, session: Session, current: Current
+) -> None:
+    await require_identity_administrator(session, current)
+    await service_principal_or_404(session, current.principal.organization_id, principal_id)
+    token = await session.scalar(
+        select(PersonalAccessToken).where(
+            PersonalAccessToken.id == token_id,
+            PersonalAccessToken.principal_id == principal_id,
+            PersonalAccessToken.organization_id == current.principal.organization_id,
+        )
+    )
+    if token is None:
+        raise HTTPException(status_code=404, detail="Resource not found.")
+    token.revoked_at = datetime.now(UTC)
+    await session.commit()
+
+
+@router.post("/identity-providers", status_code=status.HTTP_201_CREATED)
+async def create_identity_provider(
+    request: IdentityProviderCreate, session: Session, current: Current
+) -> dict[str, str]:
+    await require_identity_administrator(session, current)
+    provider = IdentityProvider(
+        organization_id=current.principal.organization_id,
+        name=request.name,
+        issuer=str(request.issuer).rstrip("/"),
+        client_id=request.client_id,
+        client_secret_reference=request.client_secret_reference,
+        allowed_organization=request.allowed_organization,
+        group_claim=request.group_claim,
+        trusted_endpoint_hosts=request.trusted_endpoint_hosts,
+        jit_provisioning_enabled=request.jit_provisioning_enabled,
+    )
+    session.add(provider)
+    try:
+        await session.commit()
+    except IntegrityError as error:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409, detail="Identity provider conflicts with existing configuration."
+        ) from error
+    return {"id": str(provider.id)}
+
+
+@router.post("/external-groups", status_code=status.HTTP_201_CREATED)
+async def create_external_group(
+    request: ExternalGroupCreate, session: Session, current: Current
+) -> dict[str, str]:
+    await require_identity_administrator(session, current)
+    provider = await session.scalar(
+        select(IdentityProvider).where(
+            IdentityProvider.id == request.identity_provider_id,
+            IdentityProvider.organization_id == current.principal.organization_id,
+        )
+    )
+    if provider is None:
+        raise HTTPException(status_code=404, detail="Resource not found.")
+    group = ExternalGroup(
+        organization_id=current.principal.organization_id,
+        identity_provider_id=request.identity_provider_id,
+        external_id=request.external_id,
+        display_name=request.display_name,
+    )
+    session.add(group)
+    try:
+        await session.commit()
+    except IntegrityError as error:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="External group already exists.") from error
+    return {"id": str(group.id)}
+
+
+@router.post("/external-groups/{group_id}/role-mappings", status_code=status.HTTP_201_CREATED)
+async def create_group_role_mapping(
+    group_id: UUID, request: GroupRoleMappingCreate, session: Session, current: Current
+) -> dict[str, str]:
+    await require_identity_administrator(session, current)
+    group = await session.scalar(
+        select(ExternalGroup).where(
+            ExternalGroup.id == group_id,
+            ExternalGroup.organization_id == current.principal.organization_id,
+        )
+    )
+    if group is None:
+        raise HTTPException(status_code=404, detail="Resource not found.")
+    if request.collection_id is not None:
+        collection = await session.get(Collection, request.collection_id)
+        if collection is None or collection.organization_id != current.principal.organization_id:
+            raise HTTPException(status_code=404, detail="Resource not found.")
+    mapping = GroupRoleMapping(
+        organization_id=current.principal.organization_id,
+        external_group_id=group.id,
+        role=request.role,
+        collection_id=request.collection_id,
+    )
+    session.add(mapping)
+    try:
+        await session.commit()
+    except IntegrityError as error:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="Group role mapping already exists.") from error
+    return {"id": str(mapping.id)}

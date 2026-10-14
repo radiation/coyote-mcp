@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coyote_mcp.app import app
-from coyote_mcp.auth import ALL_ACTIONS, issue_pat
+from coyote_mcp.auth import ALL_ACTIONS, authenticate_token, issue_pat
 from coyote_mcp.db import get_session
 from coyote_mcp.models import Organization, Principal, RoleAssignment
 from coyote_mcp.settings import Settings
@@ -128,3 +128,79 @@ async def test_collection_and_server_catalog_endpoints(
     assert collection_tools.json() == []
     assert deleted.status_code == 204
     assert collection_without_membership.json()["memberships"] == []
+
+
+@pytest.mark.asyncio
+async def test_service_principal_credentials_are_admin_managed(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        headers = await credentials(session_factory)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            created = await client.post(
+                "/api/v1/service-principals",
+                headers=headers,
+                json={
+                    "identifier": "automation",
+                    "display_name": "Automation",
+                    "roles": ["viewer"],
+                },
+            )
+            principal_id = created.json()["id"]
+            listed = await client.get("/api/v1/service-principals", headers=headers)
+            issued = await client.post(
+                f"/api/v1/service-principals/{principal_id}/pats",
+                headers=headers,
+                json={
+                    "name": "worker",
+                    "scopes": ["server:read"],
+                    "lifetime_seconds": 3600,
+                },
+            )
+            identity_provider = await client.post(
+                "/api/v1/identity-providers",
+                headers=headers,
+                json={
+                    "name": "Corporate",
+                    "issuer": "https://issuer.example",
+                    "client_id": "client",
+                    "client_secret_reference": "env:CORPORATE_SECRET",
+                    "group_claim": "groups",
+                    "jit_provisioning_enabled": True,
+                },
+            )
+            group = await client.post(
+                "/api/v1/external-groups",
+                headers=headers,
+                json={
+                    "identity_provider_id": identity_provider.json()["id"],
+                    "external_id": "group-id",
+                    "display_name": "Engineering",
+                },
+            )
+            mapping = await client.post(
+                f"/api/v1/external-groups/{group.json()['id']}/role-mappings",
+                headers=headers,
+                json={"role": "viewer"},
+            )
+            disabled = await client.post(
+                f"/api/v1/service-principals/{principal_id}/disable", headers=headers
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert created.status_code == 201
+    assert [principal["identifier"] for principal in listed.json()] == ["automation"]
+    assert issued.status_code == 201
+    assert identity_provider.status_code == 201
+    assert mapping.status_code == 201
+    assert disabled.status_code == 204
+    async with session_factory() as session:
+        assert await authenticate_token(session, issued.json()["token"]) is None
