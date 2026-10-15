@@ -8,6 +8,7 @@ from coyote_mcp.auth import (
     authenticate_browser_session,
     authenticate_token,
     authorize,
+    authorized_collection_ids,
     issue_browser_session,
     issue_pat,
     resolve_external_identity,
@@ -88,6 +89,47 @@ async def test_authorize_requires_tenant_context_and_enforces_collection_scope(
     assert (
         await authorize(session, principal, "collection:read", collection)
     ).reason == "principal_disabled"
+
+
+@pytest.mark.asyncio
+async def test_authorized_collection_ids_batches_organization_and_collection_grants(
+    session, organization: Organization
+) -> None:
+    visible = Collection(organization_id=organization.id, slug="visible", display_name="Visible")
+    hidden = Collection(organization_id=organization.id, slug="hidden", display_name="Hidden")
+    collection_principal = Principal(
+        organization_id=organization.id,
+        identifier="collection-principal",
+        display_name="Collection Principal",
+    )
+    session.add_all([visible, hidden, collection_principal])
+    await session.flush()
+    session.add(
+        RoleAssignment(
+            organization_id=organization.id,
+            principal_id=collection_principal.id,
+            role="consumer",
+            collection_id=visible.id,
+        )
+    )
+    await session.commit()
+
+    collection_scope = await authorized_collection_ids(
+        session,
+        collection_principal,
+        "tool:discover",
+        [visible, hidden],
+    )
+    assert collection_scope == {visible.id}
+
+    organization_principal = await create_principal(session, organization, "consumer")
+    organization_scope = await authorized_collection_ids(
+        session,
+        organization_principal,
+        "tool:discover",
+        [visible, hidden],
+    )
+    assert organization_scope == {visible.id, hidden.id}
 
 
 @pytest.mark.asyncio

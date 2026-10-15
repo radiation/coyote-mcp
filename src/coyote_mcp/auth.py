@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -301,6 +302,52 @@ async def effective_permissions(
         )
         roles.update(group_roles.all())
     return frozenset().union(*(ROLE_PERMISSIONS.get(role, frozenset()) for role in roles))
+
+
+async def authorized_collection_ids(
+    session: AsyncSession,
+    principal: Principal,
+    action: str,
+    collections: Sequence[Collection],
+    verified_group_ids: frozenset[str] = frozenset(),
+    identity_provider_id: UUID | None = None,
+) -> frozenset[UUID]:
+    if action not in ALL_ACTIONS or not principal.enabled:
+        return frozenset()
+    candidate_ids = {
+        collection.id
+        for collection in collections
+        if collection.organization_id == principal.organization_id
+    }
+    if not candidate_ids:
+        return frozenset()
+    assignments = await session.execute(
+        select(RoleAssignment.role, RoleAssignment.collection_id).where(
+            RoleAssignment.principal_id == principal.id,
+            RoleAssignment.organization_id == principal.organization_id,
+        )
+    )
+    role_scopes = list(assignments.all())
+    if verified_group_ids and identity_provider_id is not None:
+        group_assignments = await session.execute(
+            select(GroupRoleMapping.role, GroupRoleMapping.collection_id)
+            .join(ExternalGroup, GroupRoleMapping.external_group_id == ExternalGroup.id)
+            .where(
+                GroupRoleMapping.organization_id == principal.organization_id,
+                ExternalGroup.external_id.in_(verified_group_ids),
+                ExternalGroup.identity_provider_id == identity_provider_id,
+            )
+        )
+        role_scopes.extend(group_assignments.all())
+    authorized_ids: set[UUID] = set()
+    for role, assigned_collection_id in role_scopes:
+        if action not in ROLE_PERMISSIONS.get(role, frozenset()):
+            continue
+        if assigned_collection_id is None:
+            return frozenset(candidate_ids)
+        if assigned_collection_id in candidate_ids:
+            authorized_ids.add(assigned_collection_id)
+    return frozenset(authorized_ids)
 
 
 async def resolve_external_identity(

@@ -15,7 +15,9 @@ that must preserve these invariants.
 - **Authorization is centralized and default-deny.** `auth.authorize` evaluates
   an enabled principal, known action, matching organization, roles, and optional
   collection scope. Callers must enforce that decision in application services,
-  not exclusively in HTTP handlers.
+  not exclusively in HTTP handlers. Collection-list authorization uses the same
+  policy data through a batched helper so unscoped discovery does not issue one
+  role lookup per collection.
 - **PAT scopes attenuate permissions.** PAT creation requires requested scopes
   to be a subset of the principal's direct role permissions; a request must
   satisfy both its token scope and current role evaluation.
@@ -61,6 +63,15 @@ that must preserve these invariants.
   4.1.0 does not expose a response-stream interception hook compatible with its
   Streamable HTTP client, so the result-size bound is enforced immediately after
   FastMCP deserializes the result rather than while its response body streams.
+- **MCP network work does not hold registry read transactions.** Execution
+  snapshots authorization and routing data in a dedicated short-lived session,
+  which closes before validation or downstream network I/O. It does not commit
+  or roll back mutations owned by the caller session.
+- **Untrusted schemas cannot block gateway workers.** Stored JSON Schema checks
+  run in a CPU-limited child process with a bounded wall-clock deadline. A
+  validation timeout, worker failure, or unresolved external `$ref` rejects the
+  invocation before any downstream request is made. Schema validation permits
+  local references but never retrieves remote schemas.
 - **Migrations are additive.** Alembic history is the durable schema contract;
   revisions must not be rewritten and should remain backward-compatible where
   practical.

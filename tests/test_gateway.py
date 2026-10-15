@@ -1,5 +1,6 @@
 import asyncio
 import socket
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -52,6 +53,10 @@ async def downstream_server() -> AsyncIterator[tuple[str, list[bytes | None]]]:
     @downstream.tool
     async def large_lookup() -> str:
         return "x" * 2_048
+
+    @downstream.tool
+    async def nullable_lookup() -> dict[str, None]:
+        return {"value": None}
 
     downstream_app = downstream.http_app(path="/mcp", transport="streamable-http")
     authorization_headers: list[bytes | None] = []
@@ -363,6 +368,7 @@ async def test_gateway_preserves_tool_errors_and_enforces_execution_limits(
         failing_tool = await add_catalog_tool(session, tool, "tool_error")
         delayed_tool = await add_catalog_tool(session, tool, "delayed_lookup")
         large_tool = await add_catalog_tool(session, tool, "large_lookup")
+        nullable_tool = await add_catalog_tool(session, tool, "nullable_lookup")
         permissive_settings = Settings(
             allow_insecure_endpoints=True,
             allow_private_endpoints=True,
@@ -372,6 +378,10 @@ async def test_gateway_preserves_tool_errors_and_enforces_execution_limits(
             session, current, failing_tool.id, {}, "engineering"
         )
         assert tool_error_result["is_error"] is True
+        nullable_result = await GatewayService(permissive_settings).execute_tool(
+            session, current, nullable_tool.id, {}, "engineering"
+        )
+        assert nullable_result["structured_content"] == {"value": None}
 
         with pytest.raises(GatewayError, match="timed out"):
             await GatewayService(
@@ -389,6 +399,27 @@ async def test_gateway_preserves_tool_errors_and_enforces_execution_limits(
                     max_execution_result_bytes=100,
                 )
             ).execute_tool(session, current, large_tool.id, {}, "engineering")
+
+
+@pytest.mark.asyncio
+async def test_gateway_execution_does_not_finalize_caller_transaction(
+    session: AsyncSession,
+) -> None:
+    _, token, tool = await _collection_consumer(session)
+    current = await authenticate_token(session, token)
+    assert current is not None
+
+    async with downstream_server() as (endpoint, _):
+        await point_tool_at_downstream(session, tool, endpoint)
+        unrelated = Organization(slug=f"pending-{uuid4().hex}", display_name="Pending")
+        session.add(unrelated)
+        result = await GatewayService(
+            Settings(allow_insecure_endpoints=True, allow_private_endpoints=True)
+        ).execute_tool(session, current, tool.id, {"issue": 42}, "engineering")
+
+    assert result["structured_content"] == {"issue": 42}
+    assert unrelated in session.new
+    await session.rollback()
 
 
 @pytest.mark.asyncio
@@ -446,6 +477,52 @@ async def test_gateway_rejects_malformed_schemas_and_hardens_search(session: Asy
     await session.commit()
     with pytest.raises(GatewayError, match="Stored tool schema"):
         await service.execute_tool(session, current, tool.id, {"issue": 1}, "engineering")
+
+
+@pytest.mark.asyncio
+async def test_gateway_bounds_untrusted_schema_validation(session: AsyncSession) -> None:
+    _, token, tool = await _collection_consumer(session)
+    current = await authenticate_token(session, token)
+    assert current is not None
+    tool.input_schema = {
+        "type": "object",
+        "properties": {"issue": {"type": "string", "pattern": "^(a+)+$"}},
+        "required": ["issue"],
+    }
+    await session.commit()
+    service = GatewayService(Settings(schema_validation_timeout_seconds=0.1))
+
+    started_at = time.monotonic()
+    with pytest.raises(GatewayError, match="validation timed out"):
+        await service.execute_tool(
+            session,
+            current,
+            tool.id,
+            {"issue": "a" * 50 + "!"},
+            "engineering",
+        )
+
+    assert time.monotonic() - started_at < 1
+
+
+@pytest.mark.asyncio
+async def test_gateway_allows_local_schema_references_and_rejects_external_ones() -> None:
+    service = GatewayService(Settings())
+
+    await service._validate_arguments(
+        {
+            "type": "object",
+            "$defs": {"issue": {"type": "integer"}},
+            "properties": {"issue": {"$ref": "#/$defs/issue"}},
+        },
+        {"issue": 42},
+    )
+
+    with pytest.raises(GatewayError, match="Stored tool schema"):
+        await service._validate_arguments(
+            {"$ref": "http://127.0.0.1:9/untrusted-schema"},
+            {},
+        )
 
 
 @pytest.mark.asyncio

@@ -51,9 +51,14 @@ the registered DNS-pinned endpoint without forwarding the coyote PAT.
 
 Search trims surrounding whitespace, rejects overlong queries, and escapes SQL
 `LIKE` wildcard characters before querying authorized collections. Stored JSON
-Schemas are checked before execution arguments are checked against them;
-callers cannot supply a replacement schema. FastMCP tool-level errors remain
-structured results. Expected timeout, protocol, and transport failures are
+Schemas are checked in a CPU-limited child process with a bounded wall-clock
+deadline before execution arguments are checked against them; callers cannot
+supply a replacement schema. This prevents pathological untrusted schema
+patterns from blocking the gateway event loop. Validation permits local `$ref`
+targets but uses a non-retrieving registry, so remote references cannot bypass
+destination validation. FastMCP tool-level errors remain structured results, and
+explicit JSON null values in downstream structured content are preserved.
+Expected timeout, protocol, and transport failures are
 sanitized; unexpected failures are logged without bearer credentials or raw
 request headers. The configured response-size limit is applied immediately
 after FastMCP materializes a result. Its current public client transport does
