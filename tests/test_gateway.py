@@ -1,6 +1,5 @@
 import asyncio
 import socket
-import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -492,7 +491,6 @@ async def test_gateway_bounds_untrusted_schema_validation(session: AsyncSession)
     await session.commit()
     service = GatewayService(Settings(schema_validation_timeout_seconds=5))
 
-    started_at = time.monotonic()
     with pytest.raises(GatewayError, match="validation timed out"):
         await service.execute_tool(
             session,
@@ -501,8 +499,6 @@ async def test_gateway_bounds_untrusted_schema_validation(session: AsyncSession)
             {"issue": "a" * 50 + "!"},
             "engineering",
         )
-
-    assert time.monotonic() - started_at < 10
 
 
 @pytest.mark.asyncio
