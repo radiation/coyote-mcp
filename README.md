@@ -129,8 +129,7 @@ require HTTPS, are HTTP-only, and use `SameSite=Lax`. Browser session mutations,
 including logout, require the `X-CSRF-Token` value stored in the session. Bearer
 authentication takes precedence whenever an `Authorization` header is present:
 an invalid bearer token returns `401` and never falls back to a browser session.
-The session is not accepted by MCP:
-`/mcp` remains blocked until protocol-specific policy enforcement exists.
+Browser sessions are not accepted by MCP; the protocol endpoint requires a PAT.
 
 External accounts are bound immutably by `(organization, issuer, subject)`.
 Email is display metadata only and is never used to link accounts. Set
@@ -220,11 +219,85 @@ curl http://localhost:8000/api/v1/collections/<collection-id>/tools?limit=50&off
 ```
 
 Only public HTTPS endpoints are accepted by default. Internal-network servers and
-plain HTTP require both `ALLOW_PRIVATE_ENDPOINTS=true` and
-`ALLOW_INSECURE_ENDPOINTS=true` as explicit deployment configuration. Redirects
-are not followed during discovery; this prevents a safe public endpoint from
-redirecting to an unsafe destination. Credentials must be provided through a
-future secret-management/authentication mechanism, never embedded in an endpoint URL.
+plain HTTP require either explicit broad development configuration or a matching
+entry in `ALLOWED_PRIVATE_ENDPOINT_HOSTS` and
+`ALLOWED_INSECURE_ENDPOINT_HOSTS`, respectively. The host allowlists are the
+preferred way to permit a known local service without enabling access to all
+private or insecure destinations. Redirects are not followed during discovery;
+this prevents a safe public endpoint from redirecting to an unsafe destination.
+Credentials must be provided through a future secret-management/authentication
+mechanism, never embedded in an endpoint URL.
+
+## Phase 3A MCP gateway
+
+`/mcp` is a FastMCP Streamable HTTP endpoint. It accepts only coyote PAT bearer
+tokens, rejecting missing, invalid, expired, revoked, disabled-principal, and
+browser-session credentials. The installed MCP SDK supports protocol versions
+`2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`, and `2026-07-28`.
+
+After protocol negotiation, the gateway publishes exactly three tools:
+
+- `coyote_search_tools(query, collection_slug?, limit?)` returns compact active
+  catalog records for currently authorized collections, without schemas.
+- `coyote_describe_tool(tool_id, collection_slug?)` returns the published input
+  schema and authorized metadata for one active catalog tool.
+- `coyote_execute_tool(tool_id, arguments, collection_slug?)` validates stored
+  JSON Schema input and invokes the registered Streamable HTTP server.
+
+The gateway filters tenants and authorization before pagination or metadata
+returns. It reloads the persisted tool and current authorization for every
+description and execution request. A collection-scoped grant requires the
+matching collection context and active membership, so a multi-collection tool
+cannot be invoked through a collection the caller cannot use. Execution only
+uses registered, ready Streamable HTTP destinations and preserves the existing
+DNS pinning, public-address checks, redirect restrictions, timeout, and bounded
+response protections. The coyote PAT is never forwarded downstream.
+
+For local MCP integration tests, `tests/test_gateway.py` uses FastMCP's real
+Streamable HTTP client against the ASGI application, a deterministic SQLite
+catalog fixture, and a Uvicorn-hosted local FastMCP downstream server; it has no
+external identity-provider or LLM dependency. The configured response-size
+limit is checked after FastMCP has materialized a downstream result because the
+current public FastMCP transport does not provide a compatible streaming hook.
+
+Phase 3A supports unauthenticated downstream servers only. Downstream credential
+delegation, audit/cancellation, fine-grained per-tool deny policies, native tool
+aggregation, the HTMX dashboard, pgvector/RAG, and a custom OAuth authorization
+server remain out of scope. Tool annotations are untrusted and do not establish
+safety.
+
+## Local end-to-end smoke test
+
+The optional `smoke` Compose profile starts an internal FastMCP server with
+`echo`, `add`, and a deterministic failing tool. It has no published host port;
+only the Compose network can reach it. The application receives narrow private
+and insecure destination exceptions for the `smoke-mcp` hostname only.
+
+```bash
+docker compose --profile smoke up --build -d
+uv run python scripts/smoke_mcp.py
+docker compose --profile smoke down
+```
+
+The runner creates two unique temporary organizations and short-lived PATs,
+registers and synchronizes the internal server through the REST API, creates a
+collection and service principal, then uses a real FastMCP client to list,
+search, describe, execute `echo` and `add`, and preserve the failing-tool error.
+It also verifies cross-organization invisibility and that a revoked service PAT
+can no longer establish an MCP session. Temporary resources are deleted in a
+`finally` block; the runner never prints bearer tokens. It requires the local
+PostgreSQL port exposed by Compose and uses `DATABASE_URL` if supplied.
+
+For a manual MCP Inspector session, first bootstrap an owner PAT once:
+
+```bash
+docker compose run --rm app uv run coyote-mcp bootstrap-admin
+```
+
+Configure MCP Inspector with Streamable HTTP URL
+`http://127.0.0.1:8000/mcp` and an `Authorization: Bearer <PAT>` header. The
+mock server is test-only and is not a downstream-authentication or Phase 3B
+exercise.
 
 ## Checks
 

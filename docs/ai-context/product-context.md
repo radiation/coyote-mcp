@@ -5,16 +5,17 @@ MCP servers into a governed catalog. It solves the operational problem of
 finding tools across teams while retaining organization boundaries,
 authorization, and safe remote discovery.
 
-The persisted catalog contains collections, servers, and tool descriptions
-today. A client-facing progressive MCP tool-discovery interface, where clients
-discover those capabilities instead of loading every downstream tool at once,
-is planned for Phase 3. Collections organize related capabilities but do not
-grant permission; organization-scoped roles and policies decide access.
+The persisted catalog contains collections, servers, and tool descriptions.
+Phase 3A supplies a progressive MCP interface: clients search, describe, and
+execute authorized catalog tools through three fixed gateway tools rather than
+loading every downstream tool at once. Collections organize related capabilities
+but do not grant permission; organization-scoped roles and policies decide access.
 
-The current product delivers the registry, catalog, PAT authorization, and
-enterprise OIDC foundations. The next roadmap step is authenticated MCP
-discovery and execution that applies the same policy at invocation time.
-Subsequent work includes an HTMX operator console and semantic tool discovery.
+The current product delivers the registry, catalog, PAT authorization,
+enterprise OIDC foundations, and PAT-authenticated MCP discovery/execution.
+Subsequent work includes downstream credential delegation, auditing and
+cancellation (Phase 3B), richer tool policy and aggregation (Phase 3C), an HTMX
+operator console, and semantic tool discovery.
 
 See [architecture guardrails](../architecture-guardrails.md) for invariants and
 [current priorities](current-priorities.md) for status.

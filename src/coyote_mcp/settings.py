@@ -15,7 +15,12 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://coyote:localdev-only@localhost:5432/coyote_mcp"
     allow_insecure_endpoints: bool = False
     allow_private_endpoints: bool = False
+    allowed_insecure_endpoint_hosts: list[str] = []
+    allowed_private_endpoint_hosts: list[str] = []
     discovery_timeout_seconds: float = 15.0
+    execution_timeout_seconds: float = 15.0
+    schema_validation_timeout_seconds: float = 5.0
+    max_execution_result_bytes: int = 1_048_576
     pat_max_lifetime_seconds: int = 60 * 60 * 24 * 90
     default_organization_slug: str = "default"
     default_organization_display_name: str = "Default Organization"

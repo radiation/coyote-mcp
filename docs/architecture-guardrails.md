@@ -15,7 +15,9 @@ that must preserve these invariants.
 - **Authorization is centralized and default-deny.** `auth.authorize` evaluates
   an enabled principal, known action, matching organization, roles, and optional
   collection scope. Callers must enforce that decision in application services,
-  not exclusively in HTTP handlers.
+  not exclusively in HTTP handlers. Collection-list authorization uses the same
+  policy data through a batched helper so unscoped discovery does not issue one
+  role lookup per collection.
 - **PAT scopes attenuate permissions.** PAT creation requires requested scopes
   to be a subset of the principal's direct role permissions; a request must
   satisfy both its token scope and current role evaluation.
@@ -40,23 +42,48 @@ that must preserve these invariants.
   the existing tool catalog.
 - **Downstream servers are untrusted boundaries.** Tool labels, schemas, and
   annotations are untrusted metadata. Server endpoints reject embedded
-  credentials and non-public/non-HTTPS destinations unless explicit
-  development configuration permits them.
+  credentials and non-public/non-HTTPS destinations unless explicit broad
+  development configuration or a matching hostname-specific allowlist permits
+  them.
 - **External network destinations require explicit validation.** Downstream
   and OIDC endpoints require allowed schemes, DNS resolution, public addresses
   by default, no credentials in URLs, redirect prevention, and destination
   pinning. OIDC endpoints must also remain on the issuer or explicitly trusted
   host boundary.
+- **MCP gateway operations are PAT-only and authorization is current.** The
+  Streamable HTTP endpoint at `/mcp` rejects absent, invalid, expired, revoked,
+  and browser-session credentials. Discovery, description, and execution load
+  the persisted catalog and re-evaluate PAT scopes and centralized authorization
+  for the current principal. Collection-scoped execution requires the requested
+  collection to contain the active tool's ready server.
+- **MCP execution uses registered destinations only.** Execution validates the
+  stored input schema, DNS-pins the registered endpoint, disables redirects, and
+  does not forward the caller PAT. Downstream responses remain structured but
+  are size-bounded; transport failures expose sanitized errors only. FastMCP
+  4.1.0 does not expose a response-stream interception hook compatible with its
+  Streamable HTTP client, so the result-size bound is enforced immediately after
+  FastMCP deserializes the result rather than while its response body streams.
+- **MCP network work does not hold registry read transactions.** Execution
+  snapshots authorization and routing data in a dedicated short-lived session,
+  which closes before validation or downstream network I/O. It does not commit
+  or roll back mutations owned by the caller session.
+- **Untrusted schemas cannot block gateway workers.** Stored JSON Schema checks
+  run in a spawned child process with a bounded wall-clock deadline and a Linux
+  address-space limit. Worker setup failures, crashes, resource exhaustion, and
+  deadline expiry are classified in internal logs and reject the invocation
+  before any downstream request is made. Schema validation permits local
+  references but never retrieves remote schemas.
 - **Migrations are additive.** Alembic history is the durable schema contract;
   revisions must not be rewritten and should remain backward-compatible where
   practical.
+- **Local smoke destinations are narrow exceptions.** The optional Compose
+  `smoke-mcp` service is reachable only on the Compose network. Its plain-HTTP
+  private address is accepted only when both destination hostname allowlists
+  contain `smoke-mcp`; these settings do not permit arbitrary private or
+  insecure endpoints.
 
 ## Planned functionality
 
-- **Authenticated MCP discovery and execution:** FastMCP protocol operations
-  are currently blocked with `503` because the protocol adapter does not yet
-  apply shared policy enforcement. When enabled, dynamic discovery and tool
-  execution must re-evaluate current authorization at invocation time.
 - **Credentialed downstream integrations:** The registry has no general
   downstream credential storage or propagation mechanism yet. Any future
   mechanism must preserve the secret and destination protections above.
@@ -64,6 +91,8 @@ that must preserve these invariants.
   auditing, metrics, and richer policy features are future work. They must use
   the database registry and centralized authorization rather than create a
   parallel policy path.
+- **Fine-grained tool policy:** Tool-specific allow and deny policies are not
+  implemented. Tool annotations are untrusted metadata and never imply safety.
 
 ## Review checklist
 
