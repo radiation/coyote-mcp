@@ -18,6 +18,8 @@ from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.exceptions import FastMCPError
 from jsonschema import Draft202012Validator, SchemaError
+from mcp.shared.exceptions import MCPError
+from mcp.types import REQUEST_TIMEOUT
 from referencing import Registry
 from referencing.exceptions import Unresolvable
 from sqlalchemy import Select, select
@@ -71,6 +73,8 @@ def _run_schema_validation(
         if process.is_alive():
             process.terminate()
             process.join()
+            return "timed_out"
+        if process.exitcode != 0:
             return "timed_out"
         try:
             return result_queue.get(timeout=0.1)
@@ -199,6 +203,10 @@ class GatewayService:
                 )
         except (TimeoutError, httpx.TimeoutException, httpx2.TimeoutException) as error:
             raise GatewayError("Downstream tool execution timed out.") from error
+        except MCPError as error:
+            if error.code == REQUEST_TIMEOUT:
+                raise GatewayError("Downstream tool execution timed out.") from error
+            raise GatewayError("Downstream tool execution failed.") from error
         except (FastMCPError, RuntimeError, httpx.HTTPError, httpx2.HTTPError) as error:
             raise GatewayError("Downstream tool execution failed.") from error
         except Exception:

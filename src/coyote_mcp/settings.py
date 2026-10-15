@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     allowed_private_endpoint_hosts: list[str] = []
     discovery_timeout_seconds: float = 15.0
     execution_timeout_seconds: float = 15.0
-    schema_validation_timeout_seconds: float = 1.0
+    schema_validation_timeout_seconds: float = 5.0
     max_execution_result_bytes: int = 1_048_576
     pat_max_lifetime_seconds: int = 60 * 60 * 24 * 90
     default_organization_slug: str = "default"
