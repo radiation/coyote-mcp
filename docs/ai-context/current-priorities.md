@@ -14,12 +14,14 @@
   collection-bound, validated, DNS-pinned, timeout-bounded, and does not
   forward caller credentials. Hardening adds escaped/bounded lexical search,
   explicit schema validation, classified downstream failures, response-size
-  bounds, deterministic local FastMCP execution tests, and CPU/time-bounded
-  child-process validation for untrusted stored schemas with local-only `$ref`
-  resolution. Execution snapshots authorized routing data in a short-lived
-  session before downstream I/O, avoiding held registry connections; downstream
-  structured results preserve explicit JSON null values. Unscoped discovery
-  batches tenant-scoped collection grant evaluation before result limiting.
+  bounds, deterministic local FastMCP execution tests, and spawned,
+  address-space/time-bounded child-process validation for untrusted stored
+  schemas with local-only `$ref` resolution. Worker setup failures, crashes,
+  resource exhaustion, and deadline expiry are internally classified. Execution
+  snapshots authorized routing data in a short-lived session before downstream
+  I/O, avoiding held registry connections; downstream structured results
+  preserve explicit JSON null values. Unscoped discovery batches tenant-scoped
+  collection grant evaluation before result limiting.
 - **Quality and security infrastructure:** Python 3.14/uv, Ruff, strict mypy,
   pytest branch coverage (80% minimum), PostgreSQL integration tests, Docker
   Compose development, Dependabot, CI, and CodeQL configuration.

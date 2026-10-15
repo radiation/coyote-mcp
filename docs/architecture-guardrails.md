@@ -68,10 +68,11 @@ that must preserve these invariants.
   which closes before validation or downstream network I/O. It does not commit
   or roll back mutations owned by the caller session.
 - **Untrusted schemas cannot block gateway workers.** Stored JSON Schema checks
-  run in a CPU-limited child process with a bounded wall-clock deadline. A
-  validation timeout, worker failure, or unresolved external `$ref` rejects the
-  invocation before any downstream request is made. Schema validation permits
-  local references but never retrieves remote schemas.
+  run in a spawned child process with a bounded wall-clock deadline and a Linux
+  address-space limit. Worker setup failures, crashes, resource exhaustion, and
+  deadline expiry are classified in internal logs and reject the invocation
+  before any downstream request is made. Schema validation permits local
+  references but never retrieves remote schemas.
 - **Migrations are additive.** Alembic history is the durable schema contract;
   revisions must not be rewritten and should remain backward-compatible where
   practical.

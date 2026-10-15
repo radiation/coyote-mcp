@@ -4,10 +4,12 @@ import asyncio
 import json
 import logging
 import multiprocessing
-import queue
 import resource
+import signal
+import sys
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
+from multiprocessing.connection import Connection
 from typing import Any, cast
 from uuid import UUID
 
@@ -39,50 +41,95 @@ from coyote_mcp.settings import Settings
 
 MAX_SEARCH_RESULTS = 25
 MAX_SEARCH_QUERY_LENGTH = 256
+_SCHEMA_VALIDATION_MEMORY_LIMIT_BYTES = 256 * 1024 * 1024
 _LIKE_ESCAPE = "\\"
 logger = logging.getLogger(__name__)
 _LOCAL_SCHEMA_REGISTRY = Registry()
 
 
+@dataclass(frozen=True)
+class _SchemaValidationOutcome:
+    status: str
+    diagnostic: str
+
+
 def _validate_schema_in_worker(
-    schema: dict[str, Any], arguments: dict[str, Any], result_queue: multiprocessing.Queue[str]
+    schema: dict[str, Any], arguments: dict[str, Any], result_connection: Connection
 ) -> None:
-    resource.setrlimit(resource.RLIMIT_CPU, (1, 1))
     try:
-        Draft202012Validator.check_schema(schema)
-        validator = Draft202012Validator(schema, registry=_LOCAL_SCHEMA_REGISTRY)
-        errors = sorted(validator.iter_errors(arguments), key=lambda error: list(error.path))
-    except SchemaError, Unresolvable:
-        result_queue.put("invalid_schema")
-    else:
-        result_queue.put("invalid_arguments" if errors else "valid")
+        if sys.platform == "linux":
+            resource.setrlimit(
+                resource.RLIMIT_AS,
+                (_SCHEMA_VALIDATION_MEMORY_LIMIT_BYTES, _SCHEMA_VALIDATION_MEMORY_LIMIT_BYTES),
+            )
+        try:
+            Draft202012Validator.check_schema(schema)
+            validator = Draft202012Validator(schema, registry=_LOCAL_SCHEMA_REGISTRY)
+            errors = sorted(validator.iter_errors(arguments), key=lambda error: list(error.path))
+        except SchemaError, Unresolvable:
+            outcome = _SchemaValidationOutcome(
+                "invalid_schema", "schema validation rejected schema"
+            )
+        except MemoryError:
+            outcome = _SchemaValidationOutcome("resource_limited", "address-space limit exceeded")
+        except Exception as error:
+            outcome = _SchemaValidationOutcome("worker_failed", type(error).__name__)
+        else:
+            outcome = _SchemaValidationOutcome(
+                "invalid_arguments" if errors else "valid", "validation completed"
+            )
+    except (OSError, ValueError) as error:
+        outcome = _SchemaValidationOutcome("worker_setup_failed", type(error).__name__)
+    try:
+        result_connection.send(outcome)
+    finally:
+        result_connection.close()
 
 
 def _run_schema_validation(
     schema: dict[str, Any], arguments: dict[str, Any], timeout_seconds: float
 ) -> str:
     context = multiprocessing.get_context("spawn")
-    result_queue: multiprocessing.Queue[str] = context.Queue(maxsize=1)
+    result_connection, worker_connection = context.Pipe(duplex=False)
     process = context.Process(
         target=_validate_schema_in_worker,
-        args=(schema, arguments, result_queue),
+        args=(schema, arguments, worker_connection),
     )
     try:
-        process.start()
+        try:
+            process.start()
+        except Exception as error:
+            logger.warning("Schema validation worker failed to start: %s", type(error).__name__)
+            return "worker_setup_failed"
+        worker_connection.close()
         process.join(timeout_seconds)
         if process.is_alive():
             process.terminate()
             process.join()
-            return "timed_out"
-        if process.exitcode != 0:
+            logger.warning("Schema validation worker exceeded its wall-clock deadline")
             return "timed_out"
         try:
-            return result_queue.get(timeout=0.1)
-        except queue.Empty:
-            return "failed"
+            if result_connection.poll():
+                outcome = cast(_SchemaValidationOutcome, result_connection.recv())
+                if outcome.status not in {"valid", "invalid_arguments", "invalid_schema"}:
+                    logger.warning(
+                        "Schema validation worker %s: %s", outcome.status, outcome.diagnostic
+                    )
+                return outcome.status
+        except (EOFError, OSError) as error:
+            logger.warning("Schema validation worker result pipe failed: %s", type(error).__name__)
+            return "worker_crashed"
+        if process.exitcode == -signal.SIGXCPU:
+            logger.warning("Schema validation worker exceeded its CPU limit")
+            return "cpu_limited"
+        if process.exitcode != 0:
+            logger.warning("Schema validation worker crashed with exit code %s", process.exitcode)
+            return "worker_crashed"
+        logger.warning("Schema validation worker exited without returning an outcome")
+        return "worker_failed"
     finally:
-        result_queue.close()
-        result_queue.join_thread()
+        worker_connection.close()
+        result_connection.close()
 
 
 class GatewayError(RuntimeError):
@@ -350,7 +397,7 @@ class GatewayService:
             raise GatewayError("Stored tool schema is invalid.")
         if result == "invalid_arguments":
             raise GatewayError("Tool arguments do not match the published schema.")
-        if result == "timed_out":
+        if result in {"timed_out", "cpu_limited", "resource_limited"}:
             raise GatewayError("Tool argument validation timed out.")
         if result != "valid":
             raise GatewayError("Tool argument validation failed.")
