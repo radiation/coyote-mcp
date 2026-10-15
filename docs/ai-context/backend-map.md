@@ -16,6 +16,8 @@
 | `schemas.py` | Pydantic API request/response contracts. |
 | `db.py`, `settings.py` | Async database session factory and configuration/secret-reference rules. |
 | `cli.py` | One-time bootstrap administrator/PAT workflow. |
+| `scripts/mock_mcp_server.py` | Compose-profile-only FastMCP mock exposing deterministic echo, addition, and failure tools. |
+| `scripts/smoke_mcp.py` | Live local smoke runner: temporary tenant bootstrap/cleanup plus REST and authenticated MCP workflow validation. |
 | `alembic/` | Additive schema history through the current identity, session, and provider-secret revisions. |
 
 ## Key execution paths
@@ -47,3 +49,7 @@
    server with Uvicorn for execution integration tests. It verifies discovery,
    description, execution, structured tool errors, timeout/connection failures,
    result-size bounds, and absence of forwarded coyote PAT headers.
+- `docker compose --profile smoke` starts a separate internal `smoke-mcp`
+   FastMCP service. The application only allowlists that hostname for private
+   HTTP destinations; `scripts/smoke_mcp.py` exercises the running Compose
+   control plane and MCP endpoint, then removes its unique temporary tenants.

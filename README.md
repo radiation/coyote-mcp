@@ -219,11 +219,14 @@ curl http://localhost:8000/api/v1/collections/<collection-id>/tools?limit=50&off
 ```
 
 Only public HTTPS endpoints are accepted by default. Internal-network servers and
-plain HTTP require both `ALLOW_PRIVATE_ENDPOINTS=true` and
-`ALLOW_INSECURE_ENDPOINTS=true` as explicit deployment configuration. Redirects
-are not followed during discovery; this prevents a safe public endpoint from
-redirecting to an unsafe destination. Credentials must be provided through a
-future secret-management/authentication mechanism, never embedded in an endpoint URL.
+plain HTTP require either explicit broad development configuration or a matching
+entry in `ALLOWED_PRIVATE_ENDPOINT_HOSTS` and
+`ALLOWED_INSECURE_ENDPOINT_HOSTS`, respectively. The host allowlists are the
+preferred way to permit a known local service without enabling access to all
+private or insecure destinations. Redirects are not followed during discovery;
+this prevents a safe public endpoint from redirecting to an unsafe destination.
+Credentials must be provided through a future secret-management/authentication
+mechanism, never embedded in an endpoint URL.
 
 ## Phase 3A MCP gateway
 
@@ -262,6 +265,39 @@ delegation, audit/cancellation, fine-grained per-tool deny policies, native tool
 aggregation, the HTMX dashboard, pgvector/RAG, and a custom OAuth authorization
 server remain out of scope. Tool annotations are untrusted and do not establish
 safety.
+
+## Local end-to-end smoke test
+
+The optional `smoke` Compose profile starts an internal FastMCP server with
+`echo`, `add`, and a deterministic failing tool. It has no published host port;
+only the Compose network can reach it. The application receives narrow private
+and insecure destination exceptions for the `smoke-mcp` hostname only.
+
+```bash
+docker compose --profile smoke up --build -d
+uv run python scripts/smoke_mcp.py
+docker compose --profile smoke down
+```
+
+The runner creates two unique temporary organizations and short-lived PATs,
+registers and synchronizes the internal server through the REST API, creates a
+collection and service principal, then uses a real FastMCP client to list,
+search, describe, execute `echo` and `add`, and preserve the failing-tool error.
+It also verifies cross-organization invisibility and that a revoked service PAT
+can no longer establish an MCP session. Temporary resources are deleted in a
+`finally` block; the runner never prints bearer tokens. It requires the local
+PostgreSQL port exposed by Compose and uses `DATABASE_URL` if supplied.
+
+For a manual MCP Inspector session, first bootstrap an owner PAT once:
+
+```bash
+docker compose run --rm app uv run coyote-mcp bootstrap-admin
+```
+
+Configure MCP Inspector with Streamable HTTP URL
+`http://127.0.0.1:8000/mcp` and an `Authorization: Bearer <PAT>` header. The
+mock server is test-only and is not a downstream-authentication or Phase 3B
+exercise.
 
 ## Checks
 

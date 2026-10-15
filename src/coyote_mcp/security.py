@@ -27,7 +27,11 @@ def resolve_endpoint(endpoint: str, settings: Settings) -> ResolvedEndpoint:
         raise UnsafeEndpointError("Endpoint must be an absolute HTTP(S) URL.")
     if parsed.username or parsed.password:
         raise UnsafeEndpointError("Endpoint URLs must not include credentials.")
-    if parsed.scheme != "https" and not settings.allow_insecure_endpoints:
+    if (
+        parsed.scheme != "https"
+        and not settings.allow_insecure_endpoints
+        and parsed.hostname not in settings.allowed_insecure_endpoint_hosts
+    ):
         raise UnsafeEndpointError(
             "Only HTTPS endpoints are allowed outside explicitly configured development."
         )
@@ -41,7 +45,11 @@ def resolve_endpoint(endpoint: str, settings: Settings) -> ResolvedEndpoint:
         raise UnsafeEndpointError("Endpoint hostname could not be resolved.")
     for address in resolved_addresses:
         ip = ipaddress.ip_address(address)
-        if not settings.allow_private_endpoints and not ip.is_global:
+        if (
+            not ip.is_global
+            and not settings.allow_private_endpoints
+            and parsed.hostname not in settings.allowed_private_endpoint_hosts
+        ):
             raise UnsafeEndpointError("Endpoint destination must be publicly routable.")
     return ResolvedEndpoint(
         hostname=parsed.hostname,

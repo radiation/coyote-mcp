@@ -40,8 +40,9 @@ that must preserve these invariants.
   the existing tool catalog.
 - **Downstream servers are untrusted boundaries.** Tool labels, schemas, and
   annotations are untrusted metadata. Server endpoints reject embedded
-  credentials and non-public/non-HTTPS destinations unless explicit
-  development configuration permits them.
+  credentials and non-public/non-HTTPS destinations unless explicit broad
+  development configuration or a matching hostname-specific allowlist permits
+  them.
 - **External network destinations require explicit validation.** Downstream
   and OIDC endpoints require allowed schemes, DNS resolution, public addresses
   by default, no credentials in URLs, redirect prevention, and destination
@@ -63,6 +64,11 @@ that must preserve these invariants.
 - **Migrations are additive.** Alembic history is the durable schema contract;
   revisions must not be rewritten and should remain backward-compatible where
   practical.
+- **Local smoke destinations are narrow exceptions.** The optional Compose
+  `smoke-mcp` service is reachable only on the Compose network. Its plain-HTTP
+  private address is accepted only when both destination hostname allowlists
+  contain `smoke-mcp`; these settings do not permit arbitrary private or
+  insecure endpoints.
 
 ## Planned functionality
 

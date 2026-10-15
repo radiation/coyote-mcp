@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://coyote:localdev-only@localhost:5432/coyote_mcp"
     allow_insecure_endpoints: bool = False
     allow_private_endpoints: bool = False
+    allowed_insecure_endpoint_hosts: list[str] = []
+    allowed_private_endpoint_hosts: list[str] = []
     discovery_timeout_seconds: float = 15.0
     execution_timeout_seconds: float = 15.0
     max_execution_result_bytes: int = 1_048_576

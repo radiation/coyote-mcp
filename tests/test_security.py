@@ -33,6 +33,25 @@ def test_explicit_development_configuration_allows_private_http_endpoint() -> No
     )
 
 
+def test_explicit_host_allowlists_allow_only_the_configured_local_destination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "coyote_mcp.security.socket.getaddrinfo",
+        lambda *args, **kwargs: [(None, None, None, None, ("172.18.0.5", 0))],
+    )
+    settings = Settings(
+        allowed_insecure_endpoint_hosts=["smoke-mcp"],
+        allowed_private_endpoint_hosts=["smoke-mcp"],
+    )
+
+    validate_endpoint("http://smoke-mcp:8001/mcp", settings)
+    with pytest.raises(UnsafeEndpointError):
+        validate_endpoint("https://other-private-host:8001/mcp", settings)
+    with pytest.raises(UnsafeEndpointError):
+        validate_endpoint("http://other-private-host:8001/mcp", settings)
+
+
 def test_oidc_endpoint_requires_https_and_provider_trust_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -18,6 +18,11 @@
 - **Quality and security infrastructure:** Python 3.14/uv, Ruff, strict mypy,
   pytest branch coverage (80% minimum), PostgreSQL integration tests, Docker
   Compose development, Dependabot, CI, and CodeQL configuration.
+- **Local smoke coverage:** An optional Compose-only FastMCP mock and a live
+  runner validate registration, sync, authenticated MCP discovery/description/
+  execution, structured tool failures, tenant isolation, revoked-PAT denial,
+  and temporary tenant cleanup. The profile uses hostname-specific private HTTP
+  destination allowlists rather than broad SSRF development overrides.
 
 ## Next
 

@@ -5,6 +5,8 @@ x-app: &app
   environment:
     DATABASE_URL: postgresql+asyncpg://coyote:localdev-only@postgres:5432/coyote_mcp
     PYTHONPATH: /app/src
+    ALLOWED_INSECURE_ENDPOINT_HOSTS: '["smoke-mcp"]'
+    ALLOWED_PRIVATE_ENDPOINT_HOSTS: '["smoke-mcp"]'
   volumes:
     - ./src:/app/src
     - ./alembic:/app/alembic
@@ -42,5 +44,16 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+  smoke-mcp:
+    <<: *app
+    command: ["uv", "run", "python", "/app/scripts/mock_mcp_server.py"]
+    profiles: ["smoke"]
+    expose:
+      - "8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 8001), 2).close()"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
 volumes:
   pgdata:

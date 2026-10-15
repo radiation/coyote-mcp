@@ -33,6 +33,13 @@ credentials, require HTTPS/public routing by default, disable redirects, and
 pin DNS destinations. Downstream MCP servers remain untrusted integration
 boundaries.
 
+Local Compose smoke testing is a constrained exception: the application
+allowlists only the `smoke-mcp` hostname for private addressing and plain HTTP.
+It does not enable `ALLOW_PRIVATE_ENDPOINTS` or `ALLOW_INSECURE_ENDPOINTS`, so
+other internal or HTTP destinations remain rejected. The mock service has no
+host-published port, and the smoke runner creates short-lived hashed PATs without
+logging their plaintext values.
+
 MCP uses FastMCP Streamable HTTP at `/mcp`. The installed MCP SDK supports
 `2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`, and `2026-07-28`.
 Clients call fixed universal `coyote_search_tools`, `coyote_describe_tool`, and
