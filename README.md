@@ -129,8 +129,7 @@ require HTTPS, are HTTP-only, and use `SameSite=Lax`. Browser session mutations,
 including logout, require the `X-CSRF-Token` value stored in the session. Bearer
 authentication takes precedence whenever an `Authorization` header is present:
 an invalid bearer token returns `401` and never falls back to a browser session.
-The session is not accepted by MCP:
-`/mcp` remains blocked until protocol-specific policy enforcement exists.
+Browser sessions are not accepted by MCP; the protocol endpoint requires a PAT.
 
 External accounts are bound immutably by `(organization, issuer, subject)`.
 Email is display metadata only and is never used to link accounts. Set
@@ -225,6 +224,44 @@ plain HTTP require both `ALLOW_PRIVATE_ENDPOINTS=true` and
 are not followed during discovery; this prevents a safe public endpoint from
 redirecting to an unsafe destination. Credentials must be provided through a
 future secret-management/authentication mechanism, never embedded in an endpoint URL.
+
+## Phase 3A MCP gateway
+
+`/mcp` is a FastMCP Streamable HTTP endpoint. It accepts only coyote PAT bearer
+tokens, rejecting missing, invalid, expired, revoked, disabled-principal, and
+browser-session credentials. The installed MCP SDK supports protocol versions
+`2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`, and `2026-07-28`.
+
+After protocol negotiation, the gateway publishes exactly three tools:
+
+- `coyote_search_tools(query, collection_slug?, limit?)` returns compact active
+  catalog records for currently authorized collections, without schemas.
+- `coyote_describe_tool(tool_id, collection_slug?)` returns the published input
+  schema and authorized metadata for one active catalog tool.
+- `coyote_execute_tool(tool_id, arguments, collection_slug?)` validates stored
+  JSON Schema input and invokes the registered Streamable HTTP server.
+
+The gateway filters tenants and authorization before pagination or metadata
+returns. It reloads the persisted tool and current authorization for every
+description and execution request. A collection-scoped grant requires the
+matching collection context and active membership, so a multi-collection tool
+cannot be invoked through a collection the caller cannot use. Execution only
+uses registered, ready Streamable HTTP destinations and preserves the existing
+DNS pinning, public-address checks, redirect restrictions, timeout, and bounded
+response protections. The coyote PAT is never forwarded downstream.
+
+For local MCP integration tests, `tests/test_gateway.py` uses FastMCP's real
+Streamable HTTP client against the ASGI application, a deterministic SQLite
+catalog fixture, and a Uvicorn-hosted local FastMCP downstream server; it has no
+external identity-provider or LLM dependency. The configured response-size
+limit is checked after FastMCP has materialized a downstream result because the
+current public FastMCP transport does not provide a compatible streaming hook.
+
+Phase 3A supports unauthenticated downstream servers only. Downstream credential
+delegation, audit/cancellation, fine-grained per-tool deny policies, native tool
+aggregation, the HTMX dashboard, pgvector/RAG, and a custom OAuth authorization
+server remain out of scope. Tool annotations are untrusted and do not establish
+safety.
 
 ## Checks
 

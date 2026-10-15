@@ -6,7 +6,9 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import httpx
+import httpx2
 from fastmcp import Client
+from fastmcp.client.transports import StreamableHttpTransport
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -75,7 +77,40 @@ class PinnedDestinationTransport(httpx.AsyncHTTPTransport):
             request.method,
             request.url.copy_with(host=self._endpoint.address),
             headers=headers,
-            content=request.stream,
+            stream=request.stream,
+            extensions=extensions,
+        )
+        return await super().handle_async_request(pinned_request)
+
+
+class PinnedMCPDestinationTransport(httpx2.AsyncHTTPTransport):
+    def __init__(self, endpoint: ResolvedEndpoint) -> None:
+        super().__init__(trust_env=False)
+        self._endpoint = endpoint
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        if request.url.host != self._endpoint.hostname:
+            raise UnsafeEndpointError(
+                "Discovery attempted to connect to an unexpected destination."
+            )
+        default_port = 443 if request.url.scheme == "https" else 80
+        expected_port = self._endpoint.port or default_port
+        request_port = request.url.port or default_port
+        if request_port != expected_port:
+            raise UnsafeEndpointError(
+                "Discovery attempted to connect to an unexpected destination port."
+            )
+        headers = request.headers.copy()
+        host_header = self._endpoint.hostname
+        if request.url.port is not None and request.url.port != default_port:
+            host_header = f"{host_header}:{request.url.port}"
+        headers["host"] = host_header
+        extensions = {**request.extensions, "sni_hostname": self._endpoint.hostname}
+        pinned_request = httpx2.Request(
+            request.method,
+            request.url.copy_with(host=self._endpoint.address),
+            headers=headers,
+            stream=request.stream,
             extensions=extensions,
         )
         return await super().handle_async_request(pinned_request)
@@ -92,16 +127,16 @@ class FastMCPDiscoveryClient:
     @staticmethod
     def _http_client_factory(
         endpoint: ResolvedEndpoint, timeout_seconds: float
-    ) -> Callable[..., httpx.AsyncClient]:
+    ) -> Callable[..., httpx2.AsyncClient]:
         def factory(
-            headers: dict[str, str] | None = None, auth: httpx.Auth | None = None, **_: Any
-        ) -> httpx.AsyncClient:
-            return httpx.AsyncClient(
+            headers: dict[str, str] | None = None, auth: httpx2.Auth | None = None, **_: Any
+        ) -> httpx2.AsyncClient:
+            return httpx2.AsyncClient(
                 auth=auth,
                 follow_redirects=False,
                 headers=headers,
-                timeout=httpx.Timeout(timeout_seconds),
-                transport=PinnedDestinationTransport(endpoint),
+                timeout=httpx2.Timeout(timeout_seconds),
+                transport=PinnedMCPDestinationTransport(endpoint),
                 trust_env=False,
             )
 
@@ -110,13 +145,16 @@ class FastMCPDiscoveryClient:
     async def list_tools(self, endpoint: str) -> Sequence[DiscoveredTool]:
         resolved_endpoint = self._resolve_endpoint(endpoint)
 
-        async with Client(
+        transport = StreamableHttpTransport(
             endpoint,
-            timeout=self._timeout_seconds,
-            init_timeout=self._timeout_seconds,
             httpx_client_factory=self._http_client_factory(
                 resolved_endpoint, self._timeout_seconds
             ),
+        )
+        async with Client(
+            transport,
+            timeout=self._timeout_seconds,
+            init_timeout=self._timeout_seconds,
         ) as client:
             tools = await client.list_tools()
         return [

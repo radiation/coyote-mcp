@@ -4,10 +4,11 @@
 
 | Area | Current responsibility |
 | --- | --- |
-| `app.py` | Builds FastAPI/FastMCP applications, mounts REST/OIDC routes, and blocks MCP protocol requests pending shared enforcement. |
+| `app.py` | Builds FastAPI/FastMCP applications, mounts REST/OIDC routes, and authenticates `/mcp` Streamable HTTP requests with PATs only. |
 | `api.py` | Authenticated control-plane endpoints for catalog, PATs, service principals, identity providers, groups, and mappings. |
 | `catalog.py` | Organization-scoped server, collection, membership, and catalog queries. |
 | `discovery.py` | Streamable HTTP tool discovery, pinned HTTP transport, reconciliation, and generation-safe sync. |
+| `gateway.py` | Persisted-catalog MCP search, description, execution-time authorization, schema validation, escaped lexical search, bounded downstream invocation, and result sanitization. |
 | `auth.py` | PAT/browser authentication, session lifecycle, roles, group mappings, and centralized authorization. |
 | `oidc.py` | OIDC discovery, PKCE login, browser binding, code exchange, ID-token validation, and logout/CSRF flows. |
 | `security.py` | Destination, public-address, scheme, and OIDC trust-boundary validation. |
@@ -25,7 +26,11 @@
 2. Server synchronization validates and DNS-pins the endpoint, discovers tools
    through FastMCP, then reconciles persisted tools only if its generation is
    current.
-3. OIDC login stores a short-lived transaction and browser binding server-side;
+3. An MCP client presents a PAT to `/mcp`; FastMCP exposes universal search,
+   describe, and execute tools. Each operation reloads persisted records and
+   re-evaluates centralized authorization before it returns metadata or invokes
+   a DNS-pinned registered endpoint.
+4. OIDC login stores a short-lived transaction and browser binding server-side;
    the callback consumes it atomically, validates the ID token, resolves an
    `(issuer, subject)` identity, and issues an opaque persisted session.
 
@@ -36,4 +41,9 @@
 - Add persistence through a new Alembic revision and matching SQLAlchemy model,
   constraints, Pydantic contracts, and tests.
 - Add downstream transport/auth support only through the validated discovery
-  boundary. MCP execution is a planned extension and must share authorization.
+   boundary. Execution currently supports registered unauthenticated Streamable
+   HTTP servers only.
+- `tests/test_gateway.py` hosts a deterministic local FastMCP Streamable HTTP
+   server with Uvicorn for execution integration tests. It verifies discovery,
+   description, execution, structured tool errors, timeout/connection failures,
+   result-size bounds, and absence of forwarded coyote PAT headers.

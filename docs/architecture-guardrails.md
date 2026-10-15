@@ -47,16 +47,25 @@ that must preserve these invariants.
   by default, no credentials in URLs, redirect prevention, and destination
   pinning. OIDC endpoints must also remain on the issuer or explicitly trusted
   host boundary.
+- **MCP gateway operations are PAT-only and authorization is current.** The
+  Streamable HTTP endpoint at `/mcp` rejects absent, invalid, expired, revoked,
+  and browser-session credentials. Discovery, description, and execution load
+  the persisted catalog and re-evaluate PAT scopes and centralized authorization
+  for the current principal. Collection-scoped execution requires the requested
+  collection to contain the active tool's ready server.
+- **MCP execution uses registered destinations only.** Execution validates the
+  stored input schema, DNS-pins the registered endpoint, disables redirects, and
+  does not forward the caller PAT. Downstream responses remain structured but
+  are size-bounded; transport failures expose sanitized errors only. FastMCP
+  4.1.0 does not expose a response-stream interception hook compatible with its
+  Streamable HTTP client, so the result-size bound is enforced immediately after
+  FastMCP deserializes the result rather than while its response body streams.
 - **Migrations are additive.** Alembic history is the durable schema contract;
   revisions must not be rewritten and should remain backward-compatible where
   practical.
 
 ## Planned functionality
 
-- **Authenticated MCP discovery and execution:** FastMCP protocol operations
-  are currently blocked with `503` because the protocol adapter does not yet
-  apply shared policy enforcement. When enabled, dynamic discovery and tool
-  execution must re-evaluate current authorization at invocation time.
 - **Credentialed downstream integrations:** The registry has no general
   downstream credential storage or propagation mechanism yet. Any future
   mechanism must preserve the secret and destination protections above.
@@ -64,6 +73,8 @@ that must preserve these invariants.
   auditing, metrics, and richer policy features are future work. They must use
   the database registry and centralized authorization rather than create a
   parallel policy path.
+- **Fine-grained tool policy:** Tool-specific allow and deny policies are not
+  implemented. Tool annotations are untrusted metadata and never imply safety.
 
 ## Review checklist
 
