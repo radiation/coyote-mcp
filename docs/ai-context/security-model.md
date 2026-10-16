@@ -44,24 +44,27 @@ MCP uses FastMCP Streamable HTTP at `/mcp`. The installed MCP SDK supports
 `2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`, and `2026-07-28`.
 Clients call fixed universal `coyote_search_tools`, `coyote_describe_tool`, and
 `coyote_execute_tool` tools rather than receiving every downstream tool. Search
-and description expose only authorized active catalog records. Execution loads
-the tool from PostgreSQL again, requires an authorized collection context for
-collection-scoped grants, validates stored JSON Schema input, then invokes only
-the registered DNS-pinned endpoint without forwarding the coyote PAT.
+and description expose only enabled publications in authorized active catalog
+collections. Execution loads the tool and its publication from PostgreSQL again,
+requires an authorized collection context when a tool has multiple publications,
+validates stored JSON Schema input, then invokes only the registered DNS-pinned
+endpoint without forwarding the coyote PAT.
 
 `/mcp/collections/{slug}` is also PAT-only and does not accept a client-supplied
 organization context. An enabled collection in `discovery` mode exposes the
 three universal tools with the URL collection bound server-side. An enabled
-`native` collection exposes direct persisted tools only when the principal has
+`native` collection exposes only explicitly enabled direct persisted tool
+publications when the principal has
 both `tool:discover` and `tool:execute` for that collection; discovery permission
-alone cannot reveal directly executable tools. Names are always qualified by the
-registered server name, which avoids collisions without aliases. The endpoint
-rejects, rather than truncates, a collection that exceeds
+alone cannot reveal directly executable tools. Published aliases are unique
+within their collection, MCP-compatible, explicitly managed, and stable across
+downstream server renames; clients cannot execute an unpublished tool by
+guessing an ID or alias. Publication curation applies to both native endpoints
+and the three-tool progressive discovery interface. The endpoint rejects, rather than
+truncates, a final authorized publication set that exceeds
 `COYOTE_MAX_NATIVE_TOOLS_PER_COLLECTION` (default `100`). Each `tools/list`
 reloads the authorized catalog. No `tools/list_changed` notification is emitted
 because the installed FastMCP version has no safe per-principal broadcast API.
-Changing a registered server name therefore changes the published native MCP
-tool names; stable aliases are deferred to Phase 3B.2.
 
 Search trims surrounding whitespace, rejects overlong queries, and escapes SQL
 `LIKE` wildcard characters before querying authorized collections. Stored JSON

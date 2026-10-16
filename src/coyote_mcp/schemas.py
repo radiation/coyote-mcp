@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
 
 class Page(BaseModel):
@@ -69,6 +69,44 @@ class MembershipResponse(BaseModel):
     collection_id: UUID
     server_id: UUID
     enabled: bool
+
+
+class PublicationCreate(BaseModel):
+    tool_id: UUID
+    published_name: str = Field(
+        min_length=1, max_length=200, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$"
+    )
+    description_override: str | None = Field(default=None, max_length=4096)
+    enabled: bool = True
+
+
+class PublicationUpdate(BaseModel):
+    published_name: str | None = Field(
+        default=None, min_length=1, max_length=200, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$"
+    )
+    description_override: str | None = Field(default=None, max_length=4096)
+    enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def required_fields_cannot_be_null(self) -> PublicationUpdate:
+        for field in ("enabled", "published_name"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f"{field} cannot be null")
+        return self
+
+
+class PublicationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    collection_id: UUID
+    server_id: UUID
+    tool_id: UUID
+    enabled: bool
+    published_name: str
+    description_override: str | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class CollectionResponse(BaseModel):

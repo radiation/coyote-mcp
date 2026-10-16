@@ -50,21 +50,27 @@ that must preserve these invariants.
   by default, no credentials in URLs, redirect prevention, and destination
   pinning. OIDC endpoints must also remain on the issuer or explicitly trusted
   host boundary.
-- **MCP gateway operations are PAT-only and authorization is current.** The
+- **MCP gateway operations are PAT-only, publication-gated, and authorization is current.** The
   Streamable HTTP endpoint at `/mcp` rejects absent, invalid, expired, revoked,
   and browser-session credentials. Discovery, description, and execution load
   the persisted catalog and re-evaluate PAT scopes and centralized authorization
-  for the current principal. Collection-scoped execution requires the requested
-  collection to contain the active tool's ready server.
+  for the current principal. Discovery, description, and execution require an
+  enabled publication in an authorized, enabled collection with an enabled
+  membership, active tool, and ready server. Organization-wide permissions do
+  not bypass publication. Collection-scoped execution requires that exact
+  collection publication; an ambiguous global publication requires context.
 - **Collection MCP endpoints are virtual, current, and isolated.**
   `/mcp/collections/{slug}` is served in-process and binds its collection from
   the URL rather than client tool arguments. Enabled collection access is
   re-evaluated for every request. Discovery-mode endpoints expose only the
   universal gateway tools with the bound collection context. Native-mode
   endpoints require both discovery and execution permission for publication,
-  publish only persisted ready active tools from enabled memberships under a
-  stable server-qualified name, and reject the entire view if it exceeds the
-  configured native-tool limit.
+  publish only explicitly enabled persisted publication records for ready,
+  active tools from enabled memberships. Published aliases are unique within the
+  collection, administrator-managed rather than server-derived, and retain the
+  downstream tool identity for execution. Newly synchronized tools are
+  default-deny for every gateway publication surface; the final authorized publication set is
+  rejected if it exceeds the configured native-tool limit.
 - **Collection publication changes are refresh-visible.** Native and discovery
   endpoint tool views are rebuilt from the current authorized catalog for every
   `tools/list`. FastMCP does not provide a safe principal-scoped broadcaster for
@@ -104,8 +110,9 @@ that must preserve these invariants.
   auditing, metrics, and richer policy features are future work. They must use
   the database registry and centralized authorization rather than create a
   parallel policy path.
-- **Fine-grained tool policy:** Tool-specific allow and deny policies are not
-  implemented. Tool annotations are untrusted metadata and never imply safety.
+- **Fine-grained tool policy:** Publication curation controls discovery and native visibility;
+  per-principal tool-specific allow and deny policies are not implemented. Tool
+  annotations are untrusted metadata and never imply safety.
 
 ## Review checklist
 

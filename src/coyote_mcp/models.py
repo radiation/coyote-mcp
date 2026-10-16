@@ -78,6 +78,7 @@ class Tool(Base):
     __tablename__ = "tools"
     __table_args__ = (
         UniqueConstraint("server_id", "name", name="uq_tools_server_id_name"),
+        UniqueConstraint("id", "server_id", name="uq_tools_id_server_id"),
         Index("ix_tools_server_id_active_name", "server_id", "active", "name"),
     )
 
@@ -153,6 +154,39 @@ class CollectionMembership(Base):
     )
     server: Mapped[MCPServer] = relationship(
         back_populates="memberships", overlaps="collection,memberships"
+    )
+
+
+class CollectionToolPublication(Base):
+    __tablename__ = "collection_tool_publications"
+    __table_args__ = (
+        UniqueConstraint("collection_id", "tool_id", name="uq_collection_tool_publications_tool"),
+        UniqueConstraint(
+            "collection_id", "published_name", name="uq_collection_tool_publications_name"
+        ),
+        ForeignKeyConstraint(
+            ["collection_id", "server_id"],
+            ["collection_servers.collection_id", "collection_servers.server_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["tool_id", "server_id"],
+            ["tools.id", "tools.server_id"],
+            ondelete="CASCADE",
+        ),
+        Index("ix_collection_tool_publications_collection_enabled", "collection_id", "enabled"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    collection_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    server_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    tool_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    published_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description_override: Mapped[str | None] = mapped_column(String(4096))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
 

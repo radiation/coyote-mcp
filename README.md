@@ -266,20 +266,36 @@ aggregation, the HTMX dashboard, pgvector/RAG, and a custom OAuth authorization
 server remain out of scope. Tool annotations are untrusted and do not establish
 safety.
 
-## Phase 3B.1 collection endpoints
+## Phase 3B.2 collection endpoints
 
 `/mcp/collections/{slug}` is a virtual PAT-authenticated endpoint bound to one
 enabled, authorized collection. Collections default to `discovery` exposure,
 which publishes the three universal gateway tools while forcing their collection
-context to the URL slug. `native` exposure publishes the collection's persisted,
-active tools directly under stable `<server-name>__<tool-name>` names and routes
-calls through the same authorization, schema-validation, DNS-pinned downstream
-execution path as `/mcp`.
+context to the URL slug. Discovery endpoints continue to publish only the three
+universal gateway tools, but their search, description, and execution operations
+return only enabled collection tool-publication records. `native` exposure also
+publishes only those records for persisted, active tools on ready member
+servers. The policy is `Discover -> Curate -> Publish -> Authorize -> Execute`:
+synchronization and collection membership populate eligibility only; they never
+make a tool visible or executable. Each publication has an administrator-selected,
+MCP-compatible alias and optional description override; it remains stable when a
+downstream server is renamed and always executes the original downstream identity.
 
 Native publication requires both `tool:discover` and `tool:execute` for the
-collection. It is rebuilt from the current catalog for every `tools/list` and
-does not query downstream servers. `COYOTE_MAX_NATIVE_TOOLS_PER_COLLECTION`
-defaults to `100`; a larger collection is rejected as a whole, never truncated.
+collection. Administrators list available catalog tools at
+`GET /api/v1/collections/{id}/tools`, then create, list, update, disable, or
+remove records at `/api/v1/collections/{id}/publications`. Aliases are unique
+within a collection and conflicts are rejected; no collision suffixes or silent
+renames are generated. Newly synchronized tools remain unpublished by default,
+while schema synchronization preserves publication settings. Migration `0012`
+creates the publication schema only: both fresh and upgraded collections start
+with no publications until an administrator creates them. Global discovery
+returns the collection context and published alias for each result. Global
+description or execution of a tool published in multiple authorized collections
+requires an explicit collection context. Native `tools/list` is rebuilt from
+persisted records for every request and does not query
+downstream servers. `COYOTE_MAX_NATIVE_TOOLS_PER_COLLECTION` defaults to `100`;
+a larger final authorized publication set is rejected as a whole, never truncated.
 The installed FastMCP transport does not provide a safe per-principal
 `tools/list_changed` broadcaster, so clients refresh `tools/list` to observe
 catalog, membership, availability, and exposure changes.
@@ -299,8 +315,10 @@ docker compose --profile smoke down
 
 The runner creates two unique temporary organizations and short-lived PATs,
 registers and synchronizes the internal server through the REST API, creates a
-collection and service principal, then uses a real FastMCP client to list,
-search, describe, execute `echo` and `add`, and preserve the failing-tool error.
+collection and service principal, explicitly publishes the smoke tools and later
+unpublishes `echo`, then
+uses a real FastMCP client to list, search, describe, execute `echo` and `add`,
+and preserve the failing-tool error.
 It also verifies cross-organization invisibility and that a revoked service PAT
 can no longer establish an MCP session. Temporary resources are deleted in a
 `finally` block; the runner never prints bearer tokens. It requires the local

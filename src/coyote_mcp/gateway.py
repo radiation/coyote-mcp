@@ -27,11 +27,12 @@ from referencing.exceptions import Unresolvable
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coyote_mcp.auth import AuthenticatedPrincipal, authorize, authorized_collection_ids
+from coyote_mcp.auth import AuthenticatedPrincipal, authorized_collection_ids
 from coyote_mcp.discovery import FastMCPDiscoveryClient
 from coyote_mcp.models import (
     Collection,
     CollectionMembership,
+    CollectionToolPublication,
     MCPServer,
     PersonalAccessToken,
     Principal,
@@ -140,6 +141,7 @@ class GatewayError(RuntimeError):
 class GatewayTool:
     tool_id: UUID
     name: str
+    published_name: str
     description: str
     collection_slug: str
     server_name: str
@@ -178,27 +180,31 @@ class GatewayService:
             return []
         collection_ids = [collection.id for collection in collections]
         statement = (
-            self._tool_statement(collection_ids)
+            self._publication_statement(collection_ids)
             .where(
                 Tool.name.ilike(f"%{normalized_query}%", escape=_LIKE_ESCAPE)
                 | Tool.description.ilike(f"%{normalized_query}%", escape=_LIKE_ESCAPE)
+                | CollectionToolPublication.published_name.ilike(
+                    f"%{normalized_query}%", escape=_LIKE_ESCAPE
+                )
             )
-            .order_by(Tool.name, MCPServer.name, Collection.slug, Tool.id)
+            .order_by(CollectionToolPublication.published_name, Collection.slug, Tool.id)
             .limit(limit)
         )
         rows = cast(
-            list[tuple[Tool, MCPServer, Collection]],
+            list[tuple[CollectionToolPublication, Tool, MCPServer, Collection]],
             (await session.execute(statement)).all(),
         )
         return [
             GatewayTool(
                 tool_id=tool.id,
                 name=tool.name,
-                description=tool.description,
+                published_name=publication.published_name,
+                description=publication.description_override or tool.description,
                 collection_slug=collection.slug,
                 server_name=server.name,
             )
-            for tool, server, collection in rows
+            for publication, tool, server, collection in rows
         ]
 
     async def describe_tool(
@@ -209,17 +215,18 @@ class GatewayService:
         collection_slug: str | None,
     ) -> dict[str, Any]:
         current = await self._refresh_current(session, current)
-        tool, server, collection = await self._authorized_tool(
+        tool, server, collection, publication = await self._authorized_tool(
             session, current, tool_id, collection_slug, "tool:describe"
         )
         return {
             "tool_id": str(tool.id),
             "name": tool.name,
-            "description": tool.description,
+            "published_name": publication.published_name,
+            "description": publication.description_override or tool.description,
             "input_schema": tool.input_schema,
             "output_schema": tool.output_schema,
             "annotations": tool.annotations,
-            "collection_slug": collection.slug if collection is not None else None,
+            "collection_slug": collection.slug,
             "server_name": server.name,
         }
 
@@ -252,11 +259,31 @@ class GatewayService:
             session, current, collection_slug, {"tool:discover", "tool:execute"}, "native"
         )
         rows = cast(
-            list[tuple[Tool, MCPServer, Collection]],
+            list[tuple[CollectionToolPublication, Tool]],
             (
                 await session.execute(
-                    self._tool_statement([collection.id])
-                    .order_by(MCPServer.name, Tool.name, Tool.id)
+                    select(CollectionToolPublication, Tool)
+                    .join(Tool, Tool.id == CollectionToolPublication.tool_id)
+                    .join(MCPServer, MCPServer.id == CollectionToolPublication.server_id)
+                    .join(
+                        CollectionMembership,
+                        (
+                            CollectionMembership.collection_id
+                            == CollectionToolPublication.collection_id
+                        )
+                        & (CollectionMembership.server_id == CollectionToolPublication.server_id),
+                    )
+                    .where(
+                        CollectionToolPublication.collection_id == collection.id,
+                        CollectionToolPublication.enabled.is_(True),
+                        CollectionMembership.enabled.is_(True),
+                        Tool.active.is_(True),
+                        MCPServer.status == "ready",
+                        MCPServer.transport == "streamable_http",
+                    )
+                    .order_by(
+                        CollectionToolPublication.published_name, CollectionToolPublication.id
+                    )
                     .limit(self._settings.max_native_tools_per_collection + 1)
                 )
             ).all(),
@@ -266,13 +293,13 @@ class GatewayService:
         native_tools = [
             NativeGatewayTool(
                 tool_id=tool.id,
-                published_name=f"{server.name}__{tool.name}",
-                description=tool.description,
+                published_name=publication.published_name,
+                description=publication.description_override or tool.description,
                 input_schema=dict(tool.input_schema),
                 output_schema=dict(tool.output_schema) if tool.output_schema is not None else None,
                 annotations=dict(tool.annotations),
             )
-            for tool, server, _ in rows
+            for publication, tool in rows
         ]
         if len({tool.published_name for tool in native_tools}) != len(native_tools):
             raise GatewayError("Collection native tool names are not unique.")
@@ -354,7 +381,7 @@ class GatewayService:
             raise GatewayError("Gateway database session is not bound.")
         async with AsyncSession(bind=session.bind, expire_on_commit=False) as read_session:
             refreshed_current = await self._refresh_current(read_session, current)
-            tool, server, _ = await self._authorized_tool(
+            tool, server, _, _ = await self._authorized_tool(
                 read_session,
                 refreshed_current,
                 tool_id,
@@ -420,24 +447,31 @@ class GatewayService:
             raise GatewayError("Collection endpoint is not available.")
         return collection
 
-    def _tool_statement(
+    def _publication_statement(
         self, collection_ids: list[UUID]
-    ) -> Select[tuple[Tool, MCPServer, Collection]]:
+    ) -> Select[tuple[CollectionToolPublication, Tool, MCPServer, Collection]]:
         statement = (
-            select(Tool, MCPServer, Collection)
-            .join(MCPServer, Tool.server_id == MCPServer.id)
-            .join(CollectionMembership, CollectionMembership.server_id == MCPServer.id)
-            .join(Collection, Collection.id == CollectionMembership.collection_id)
+            select(CollectionToolPublication, Tool, MCPServer, Collection)
+            .join(Tool, Tool.id == CollectionToolPublication.tool_id)
+            .join(MCPServer, MCPServer.id == CollectionToolPublication.server_id)
+            .join(
+                CollectionMembership,
+                (CollectionMembership.collection_id == CollectionToolPublication.collection_id)
+                & (CollectionMembership.server_id == CollectionToolPublication.server_id),
+            )
+            .join(Collection, Collection.id == CollectionToolPublication.collection_id)
             .where(
-                CollectionMembership.organization_id.is_not(None),
-                CollectionMembership.collection_id.in_(collection_ids),
+                CollectionToolPublication.collection_id.in_(collection_ids),
+                CollectionToolPublication.enabled.is_(True),
                 CollectionMembership.enabled.is_(True),
                 Tool.active.is_(True),
                 MCPServer.status == "ready",
                 MCPServer.transport == "streamable_http",
             )
         )
-        return cast(Select[tuple[Tool, MCPServer, Collection]], statement)
+        return cast(
+            Select[tuple[CollectionToolPublication, Tool, MCPServer, Collection]], statement
+        )
 
     async def _authorized_tool(
         self,
@@ -446,7 +480,7 @@ class GatewayService:
         tool_id: UUID,
         collection_slug: str | None,
         action: str,
-    ) -> tuple[Tool, MCPServer, Collection | None]:
+    ) -> tuple[Tool, MCPServer, Collection, CollectionToolPublication]:
         if action not in current.scopes:
             raise GatewayError("Tool is not available.")
         tool_row = await session.execute(
@@ -465,36 +499,42 @@ class GatewayService:
             raise GatewayError("Tool is not available.")
         tool, server = row
 
-        if collection_slug is not None:
-            collections = await self._authorized_collections(
-                session, current, action, collection_slug
-            )
-            if not collections:
-                raise GatewayError("Tool is not available.")
-            collection = collections[0]
-            membership = await session.scalar(
-                select(CollectionMembership).where(
-                    CollectionMembership.collection_id == collection.id,
-                    CollectionMembership.server_id == server.id,
-                    CollectionMembership.organization_id == current.principal.organization_id,
-                    CollectionMembership.enabled.is_(True),
+        collections = await self._authorized_collections(session, current, action, collection_slug)
+        if not collections:
+            raise GatewayError("Tool is not available.")
+        rows = cast(
+            list[tuple[CollectionToolPublication, Collection]],
+            (
+                await session.execute(
+                    select(CollectionToolPublication, Collection)
+                    .join(Collection, Collection.id == CollectionToolPublication.collection_id)
+                    .join(
+                        CollectionMembership,
+                        (
+                            CollectionMembership.collection_id
+                            == CollectionToolPublication.collection_id
+                        )
+                        & (CollectionMembership.server_id == CollectionToolPublication.server_id),
+                    )
+                    .where(
+                        CollectionToolPublication.collection_id.in_(
+                            [collection.id for collection in collections]
+                        ),
+                        CollectionToolPublication.tool_id == tool.id,
+                        CollectionToolPublication.server_id == server.id,
+                        CollectionToolPublication.enabled.is_(True),
+                        CollectionMembership.enabled.is_(True),
+                    )
+                    .order_by(Collection.slug, CollectionToolPublication.id)
                 )
-            )
-            if membership is None:
-                raise GatewayError("Tool is not available.")
-            return tool, server, collection
-
-        organization_decision = await authorize(
-            session,
-            current.principal,
-            action,
-            server,
-            verified_group_ids=current.verified_group_ids,
-            identity_provider_id=current.identity_provider_id,
+            ).all(),
         )
-        if organization_decision.allowed:
-            return tool, server, None
-        raise GatewayError("Collection context is required for this tool.")
+        if not rows:
+            raise GatewayError("Tool is not available.")
+        if collection_slug is None and len(rows) != 1:
+            raise GatewayError("Collection context is required for this tool.")
+        publication, collection = rows[0]
+        return tool, server, collection, publication
 
     async def _validate_arguments(self, schema: dict[str, Any], arguments: dict[str, Any]) -> None:
         result = await asyncio.to_thread(

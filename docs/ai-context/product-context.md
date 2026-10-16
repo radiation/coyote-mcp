@@ -7,9 +7,10 @@ authorization, and safe remote discovery.
 
 The persisted catalog contains collections, servers, and tool descriptions.
 Phase 3A supplies a progressive MCP interface: clients search, describe, and
-execute authorized catalog tools through three fixed gateway tools rather than
-loading every downstream tool at once. Collections organize related capabilities
-but do not grant permission; organization-scoped roles and policies decide access.
+execute published and authorized catalog tools through three fixed gateway tools
+rather than loading every downstream tool at once. Collections organize related
+capabilities but do not grant permission; organization-scoped roles and enabled
+collection publications both decide access.
 
 The current product delivers the registry, catalog, PAT authorization,
 enterprise OIDC foundations, and PAT-authenticated MCP discovery/execution.
