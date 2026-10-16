@@ -255,9 +255,9 @@ class GatewayService:
             list[tuple[Tool, MCPServer, Collection]],
             (
                 await session.execute(
-                    self._tool_statement([collection.id]).order_by(
-                        MCPServer.name, Tool.name, Tool.id
-                    )
+                    self._tool_statement([collection.id])
+                    .order_by(MCPServer.name, Tool.name, Tool.id)
+                    .limit(self._settings.max_native_tools_per_collection + 1)
                 )
             ).all(),
         )

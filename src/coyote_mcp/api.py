@@ -231,17 +231,13 @@ async def update_collection(
     collection_id: UUID, request: CollectionUpdate, session: Session, current: Current
 ) -> CollectionResponse:
     try:
-        collection = await catalog.get_collection(
-            session, current.principal.organization_id, collection_id
-        )
-        await require(session, current, "collection:update", collection)
         return CollectionResponse.model_validate(
-            await catalog.update_collection(
-                session, current.principal.organization_id, collection_id, request
-            )
+            await catalog.update_collection(session, current, collection_id, request)
         )
     except catalog.MissingResourceError as error:
         raise resource_not_found(error) from error
+    except catalog.AuthorizationError as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
 
 
 async def _get_memberships(

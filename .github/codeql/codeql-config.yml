@@ -1,0 +1,4 @@
+name: Coyote MCP CodeQL Configuration
+
+paths-ignore:
+  - "alembic/versions/**"

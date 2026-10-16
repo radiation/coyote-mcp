@@ -4,6 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coyote_mcp.auth import AuthenticatedPrincipal, authorize
 from coyote_mcp.models import Collection, CollectionMembership, MCPServer, Tool
 from coyote_mcp.schemas import CollectionCreate, CollectionUpdate, MembershipCreate, ServerCreate
 
@@ -13,6 +14,10 @@ class DuplicateResourceError(ValueError):
 
 
 class MissingResourceError(LookupError):
+    pass
+
+
+class AuthorizationError(PermissionError):
     pass
 
 
@@ -103,11 +108,23 @@ async def create_collection(
 
 async def update_collection(
     session: AsyncSession,
-    organization_id: UUID,
+    current: AuthenticatedPrincipal,
     collection_id: UUID,
     request: CollectionUpdate,
 ) -> Collection:
-    collection = await get_collection(session, organization_id, collection_id)
+    collection = await get_collection(session, current.principal.organization_id, collection_id)
+    if "collection:update" not in current.scopes:
+        raise AuthorizationError("Insufficient permissions.")
+    decision = await authorize(
+        session,
+        current.principal,
+        "collection:update",
+        collection,
+        verified_group_ids=current.verified_group_ids,
+        identity_provider_id=current.identity_provider_id,
+    )
+    if not decision.allowed:
+        raise AuthorizationError("Insufficient permissions.")
     collection.exposure_mode = request.exposure_mode
     await session.commit()
     await session.refresh(collection)

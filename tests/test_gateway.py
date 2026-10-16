@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import httpx2
@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coyote_mcp import catalog
 from coyote_mcp.app import app
-from coyote_mcp.auth import authenticate_token, issue_pat
+from coyote_mcp.auth import AuthenticatedPrincipal, authenticate_token, issue_pat
 from coyote_mcp.gateway import GatewayError, GatewayService
 from coyote_mcp.models import (
     Collection,
@@ -391,6 +391,23 @@ async def test_native_collection_endpoint_lists_and_executes_persisted_tools(
         collection.exposure_mode = "native"
         await session.commit()
 
+    original_execute_tool = GatewayService.execute_tool
+
+    async def assert_lookup_transaction_released(
+        self: GatewayService,
+        execution_session: AsyncSession,
+        current: AuthenticatedPrincipal,
+        tool_id: UUID,
+        arguments: dict[str, Any],
+        collection_slug: str | None,
+    ) -> dict[str, Any]:
+        assert execution_session.in_transaction() is False
+        return await original_execute_tool(
+            self, execution_session, current, tool_id, arguments, collection_slug
+        )
+
+    monkeypatch.setattr(GatewayService, "execute_tool", assert_lookup_transaction_released)
+
     async with downstream_server() as (endpoint, _):
         async with session_factory() as session:
             await point_tool_at_downstream(session, tool, endpoint)
@@ -654,12 +671,12 @@ async def test_native_collection_endpoint_hides_disabled_and_non_executable_view
                 disabled_tools = await client.list_tools()
                 async with session_factory() as session:
                     collection = await session.scalar(select(Collection))
+                    assert collection is not None
                     membership = await session.scalar(
                         select(CollectionMembership).where(
                             CollectionMembership.collection_id == collection.id
                         )
                     )
-                    assert collection is not None
                     assert membership is not None
                     collection.enabled = True
                     membership.enabled = False

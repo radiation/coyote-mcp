@@ -166,6 +166,7 @@ class CollectionMCP(FastMCP):
             else:
                 try:
                     tool = await service.native_tool(session, current, collection_slug, name)
+                    await session.rollback()
                     payload = await service.execute_tool(
                         session, current, tool.tool_id, arguments or {}, collection_slug
                     )
