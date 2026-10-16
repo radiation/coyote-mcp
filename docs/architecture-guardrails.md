@@ -56,6 +56,19 @@ that must preserve these invariants.
   the persisted catalog and re-evaluate PAT scopes and centralized authorization
   for the current principal. Collection-scoped execution requires the requested
   collection to contain the active tool's ready server.
+- **Collection MCP endpoints are virtual, current, and isolated.**
+  `/mcp/collections/{slug}` is served in-process and binds its collection from
+  the URL rather than client tool arguments. Enabled collection access is
+  re-evaluated for every request. Discovery-mode endpoints expose only the
+  universal gateway tools with the bound collection context. Native-mode
+  endpoints require both discovery and execution permission for publication,
+  publish only persisted ready active tools from enabled memberships under a
+  stable server-qualified name, and reject the entire view if it exceeds the
+  configured native-tool limit.
+- **Collection publication changes are refresh-visible.** Native and discovery
+  endpoint tool views are rebuilt from the current authorized catalog for every
+  `tools/list`. FastMCP does not provide a safe principal-scoped broadcaster for
+  these dynamic views, so this phase does not emit `tools/list_changed`.
 - **MCP execution uses registered destinations only.** Execution validates the
   stored input schema, DNS-pins the registered endpoint, disables redirects, and
   does not forward the caller PAT. Downstream responses remain structured but

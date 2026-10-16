@@ -37,6 +37,7 @@ from coyote_mcp.schemas import (
     CollectionCreate,
     CollectionDetailResponse,
     CollectionResponse,
+    CollectionUpdate,
     ExternalGroupCreate,
     GroupRoleMappingCreate,
     IdentityProviderCreate,
@@ -223,6 +224,20 @@ async def collection_details(
     return CollectionDetailResponse(
         **CollectionResponse.model_validate(collection).model_dump(), memberships=memberships
     )
+
+
+@router.patch("/collections/{collection_id}", response_model=CollectionResponse)
+async def update_collection(
+    collection_id: UUID, request: CollectionUpdate, session: Session, current: Current
+) -> CollectionResponse:
+    try:
+        return CollectionResponse.model_validate(
+            await catalog.update_collection(session, current, collection_id, request)
+        )
+    except catalog.MissingResourceError as error:
+        raise resource_not_found(error) from error
+    except catalog.AuthorizationError as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
 
 
 async def _get_memberships(

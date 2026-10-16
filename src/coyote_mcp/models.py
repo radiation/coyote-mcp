@@ -113,6 +113,7 @@ class Collection(Base):
     display_name: Mapped[str] = mapped_column(String(160))
     description: Mapped[str] = mapped_column(String(1000), default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    exposure_mode: Mapped[str] = mapped_column(String(16), default="discovery", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

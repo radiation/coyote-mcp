@@ -49,6 +49,20 @@ the tool from PostgreSQL again, requires an authorized collection context for
 collection-scoped grants, validates stored JSON Schema input, then invokes only
 the registered DNS-pinned endpoint without forwarding the coyote PAT.
 
+`/mcp/collections/{slug}` is also PAT-only and does not accept a client-supplied
+organization context. An enabled collection in `discovery` mode exposes the
+three universal tools with the URL collection bound server-side. An enabled
+`native` collection exposes direct persisted tools only when the principal has
+both `tool:discover` and `tool:execute` for that collection; discovery permission
+alone cannot reveal directly executable tools. Names are always qualified by the
+registered server name, which avoids collisions without aliases. The endpoint
+rejects, rather than truncates, a collection that exceeds
+`COYOTE_MAX_NATIVE_TOOLS_PER_COLLECTION` (default `100`). Each `tools/list`
+reloads the authorized catalog. No `tools/list_changed` notification is emitted
+because the installed FastMCP version has no safe per-principal broadcast API.
+Changing a registered server name therefore changes the published native MCP
+tool names; stable aliases are deferred to Phase 3B.2.
+
 Search trims surrounding whitespace, rejects overlong queries, and escapes SQL
 `LIKE` wildcard characters before querying authorized collections. Stored JSON
 Schemas are checked in a spawned child process with a bounded wall-clock

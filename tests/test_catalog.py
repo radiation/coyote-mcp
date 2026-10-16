@@ -3,9 +3,10 @@ from datetime import UTC, datetime
 import pytest
 
 from coyote_mcp import catalog
+from coyote_mcp.auth import AuthenticatedPrincipal
 from coyote_mcp.discovery import DiscoveredTool, DiscoveryService, SyncFailedError, reconcile_tools
-from coyote_mcp.models import Organization, Tool
-from coyote_mcp.schemas import CollectionCreate, MembershipCreate, ServerCreate
+from coyote_mcp.models import Organization, Principal, RoleAssignment, Tool
+from coyote_mcp.schemas import CollectionCreate, CollectionUpdate, MembershipCreate, ServerCreate
 from coyote_mcp.settings import Settings
 
 
@@ -82,6 +83,58 @@ async def test_cross_organization_membership_is_rejected(
         await catalog.add_membership(
             session, organization.id, collection.id, MembershipCreate(server_id=server.id)
         )
+
+
+@pytest.mark.asyncio
+async def test_collection_update_enforces_scope_and_authorization(
+    session, organization: Organization
+) -> None:
+    principal = Principal(
+        organization_id=organization.id,
+        identifier="maintainer",
+        display_name="Maintainer",
+    )
+    session.add(principal)
+    await session.flush()
+    collection = await catalog.create_collection(
+        session,
+        organization.id,
+        CollectionCreate(slug="engineering", display_name="Engineering"),
+    )
+    no_scope = AuthenticatedPrincipal(principal, frozenset(), None)
+    with pytest.raises(catalog.AuthorizationError, match="Insufficient permissions"):
+        await catalog.update_collection(
+            session, no_scope, collection.id, CollectionUpdate(exposure_mode="native")
+        )
+
+    scoped_but_unauthorized = AuthenticatedPrincipal(
+        principal, frozenset({"collection:update"}), None
+    )
+    with pytest.raises(catalog.AuthorizationError, match="Insufficient permissions"):
+        await catalog.update_collection(
+            session,
+            scoped_but_unauthorized,
+            collection.id,
+            CollectionUpdate(exposure_mode="native"),
+        )
+
+    session.add(
+        RoleAssignment(
+            organization_id=organization.id,
+            principal_id=principal.id,
+            role="maintainer",
+            collection_id=collection.id,
+        )
+    )
+    await session.commit()
+    updated = await catalog.update_collection(
+        session,
+        scoped_but_unauthorized,
+        collection.id,
+        CollectionUpdate(exposure_mode="native"),
+    )
+
+    assert updated.exposure_mode == "native"
 
 
 @pytest.mark.asyncio

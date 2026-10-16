@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from pydantic import model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEVELOPMENT_SESSION_SECRET = "development-only-change-me"
@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     discovery_timeout_seconds: float = 15.0
     execution_timeout_seconds: float = 15.0
     schema_validation_timeout_seconds: float = 5.0
+    max_native_tools_per_collection: int = Field(
+        default=100,
+        ge=1,
+        validation_alias=AliasChoices(
+            "COYOTE_MAX_NATIVE_TOOLS_PER_COLLECTION", "MAX_NATIVE_TOOLS_PER_COLLECTION"
+        ),
+    )
     max_execution_result_bytes: int = 1_048_576
     pat_max_lifetime_seconds: int = 60 * 60 * 24 * 90
     default_organization_slug: str = "default"

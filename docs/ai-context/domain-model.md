@@ -15,7 +15,7 @@ All primary entities are organization-scoped unless noted otherwise.
 | OIDCLoginTransaction | Short-lived, single-use server-side state/nonce/PKCE record bound to a browser and provider. |
 | MCPServer | Registered downstream server with one organization, endpoint, transport, sync state, and tool generation. |
 | Tool | Persisted advertised tool for one server; schema/annotations are untrusted metadata and active state is reconciliation-managed. |
-| Collection | Organization-scoped capability/discovery grouping. |
+| Collection | Organization-scoped capability/discovery grouping with an enabled state and an exposure mode: `discovery` for bound universal tools or `native` for direct persisted-tool publication. |
 | CollectionMembership | Many-to-many server/collection link constrained so both resources belong to the same organization. |
 
 Role assignment and collection membership are intentionally separate: a

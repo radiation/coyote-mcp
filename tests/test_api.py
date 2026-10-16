@@ -94,10 +94,19 @@ async def test_collection_and_server_catalog_endpoints(
             collection = await client.post(
                 "/api/v1/collections",
                 headers=headers,
-                json={"slug": "engineering", "display_name": "Engineering"},
+                json={
+                    "slug": "engineering",
+                    "display_name": "Engineering",
+                    "exposure_mode": "native",
+                },
             )
             collection_id = collection.json()["id"]
             collection_list = await client.get("/api/v1/collections", headers=headers)
+            collection_update = await client.patch(
+                f"/api/v1/collections/{collection_id}",
+                headers=headers,
+                json={"exposure_mode": "discovery"},
+            )
             membership = await client.post(
                 f"/api/v1/collections/{collection_id}/servers",
                 headers=headers,
@@ -122,7 +131,9 @@ async def test_collection_and_server_catalog_endpoints(
     assert server_detail.json()["id"] == server_id
     assert server_tools.json() == []
     assert collection.status_code == 201
+    assert collection.json()["exposure_mode"] == "native"
     assert [item["slug"] for item in collection_list.json()] == ["engineering"]
+    assert collection_update.json()["exposure_mode"] == "discovery"
     assert membership.status_code == 201
     assert [item["server_id"] for item in collection_detail.json()["memberships"]] == [server_id]
     assert collection_tools.json() == []

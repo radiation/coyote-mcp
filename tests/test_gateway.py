@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import httpx2
@@ -12,16 +12,18 @@ import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
+from mcp.shared.exceptions import MCPError
 from pydantic import HttpUrl
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coyote_mcp import catalog
 from coyote_mcp.app import app
-from coyote_mcp.auth import authenticate_token, issue_pat
+from coyote_mcp.auth import AuthenticatedPrincipal, authenticate_token, issue_pat
 from coyote_mcp.gateway import GatewayError, GatewayService
 from coyote_mcp.models import (
     Collection,
+    CollectionMembership,
     MCPServer,
     Organization,
     Principal,
@@ -30,6 +32,28 @@ from coyote_mcp.models import (
 )
 from coyote_mcp.schemas import CollectionCreate, MembershipCreate, ServerCreate
 from coyote_mcp.settings import Settings
+
+
+def collection_mcp_transport(token: str, collection_slug: str) -> StreamableHttpTransport:
+    def http_client_factory(
+        headers: dict[str, str] | None = None,
+        timeout: httpx2.Timeout | None = None,
+        auth: httpx2.Auth | None = None,
+        **_: object,
+    ) -> httpx2.AsyncClient:
+        return httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app),
+            base_url="http://test",
+            headers=headers,
+            timeout=timeout,
+            auth=auth,
+        )
+
+    return StreamableHttpTransport(
+        f"http://test/mcp/collections/{collection_slug}",
+        headers={"Authorization": f"Bearer {token}"},
+        httpx_client_factory=http_client_factory,
+    )
 
 
 @asynccontextmanager
@@ -352,6 +376,403 @@ async def test_mcp_client_executes_authorized_catalog_tool_end_to_end(
     assert execution.data["structured_content"] == {"issue": 42}
     assert authorization_headers
     assert authorization_headers == [None] * len(authorization_headers)
+
+
+@pytest.mark.asyncio
+async def test_native_collection_endpoint_lists_and_executes_persisted_tools(
+    session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ALLOW_INSECURE_ENDPOINTS", "true")
+    monkeypatch.setenv("ALLOW_PRIVATE_ENDPOINTS", "true")
+    async with session_factory() as session:
+        _, token, tool = await _collection_consumer(session)
+        collection = await session.scalar(select(Collection))
+        assert collection is not None
+        collection.exposure_mode = "native"
+        await session.commit()
+
+    original_execute_tool = GatewayService.execute_tool
+
+    async def assert_lookup_transaction_released(
+        self: GatewayService,
+        execution_session: AsyncSession,
+        current: AuthenticatedPrincipal,
+        tool_id: UUID,
+        arguments: dict[str, Any],
+        collection_slug: str | None,
+    ) -> dict[str, Any]:
+        assert execution_session.in_transaction() is False
+        return await original_execute_tool(
+            self, execution_session, current, tool_id, arguments, collection_slug
+        )
+
+    monkeypatch.setattr(GatewayService, "execute_tool", assert_lookup_transaction_released)
+
+    async with downstream_server() as (endpoint, _):
+        async with session_factory() as session:
+            await point_tool_at_downstream(session, tool, endpoint)
+
+        original_factory = app.state.mcp_session_factory
+        app.state.mcp_session_factory = session_factory
+        try:
+            async with app.router.lifespan_context(app):
+                async with Client(collection_mcp_transport(token, "engineering")) as client:
+                    tools = await client.list_tools()
+                    result = await client.call_tool("downstream__issue_lookup", {"issue": 42})
+        finally:
+            app.state.mcp_session_factory = original_factory
+
+    assert [tool.name for tool in tools] == ["downstream__issue_lookup"]
+    assert result.is_error is False
+    assert result.data == {"issue": 42}
+
+
+@pytest.mark.asyncio
+async def test_collection_discovery_endpoint_binds_its_collection_context(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        _, token, tool = await _collection_consumer(session)
+
+    original_factory = app.state.mcp_session_factory
+    app.state.mcp_session_factory = session_factory
+    try:
+        async with app.router.lifespan_context(app):
+            async with Client(collection_mcp_transport(token, "engineering")) as client:
+                tools = await client.list_tools()
+                search = await client.call_tool("coyote_search_tools", {"query": "lookup"})
+                overridden = await client.call_tool(
+                    "coyote_search_tools",
+                    {"query": "lookup", "collection_slug": "other"},
+                    raise_on_error=False,
+                )
+    finally:
+        app.state.mcp_session_factory = original_factory
+
+    assert {tool.name for tool in tools} == {
+        "coyote_describe_tool",
+        "coyote_execute_tool",
+        "coyote_search_tools",
+    }
+    assert [item["tool_id"] for item in search.data] == [str(tool.id)]
+    assert overridden.is_error is True
+
+
+@pytest.mark.asyncio
+async def test_collection_endpoint_cannot_execute_an_organization_wide_tool_outside_membership(
+    session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ALLOW_INSECURE_ENDPOINTS", "true")
+    monkeypatch.setenv("ALLOW_PRIVATE_ENDPOINTS", "true")
+    async with session_factory() as session:
+        principal, token, tool = await _collection_consumer(session)
+        collection = await session.scalar(select(Collection))
+        server = await session.get(MCPServer, tool.server_id)
+        assert collection is not None
+        assert server is not None
+        other_collection = await catalog.create_collection(
+            session,
+            principal.organization_id,
+            CollectionCreate(slug="other", display_name="Other"),
+        )
+        await catalog.remove_membership(
+            session, principal.organization_id, collection.id, server.id
+        )
+        await catalog.add_membership(
+            session,
+            principal.organization_id,
+            other_collection.id,
+            MembershipCreate(server_id=server.id),
+        )
+        session.add(
+            RoleAssignment(
+                organization_id=principal.organization_id,
+                principal_id=principal.id,
+                role="consumer",
+                collection_id=None,
+            )
+        )
+        await session.commit()
+
+    async with downstream_server() as (endpoint, authorization_headers):
+        async with session_factory() as session:
+            await point_tool_at_downstream(session, tool, endpoint)
+
+        original_factory = app.state.mcp_session_factory
+        app.state.mcp_session_factory = session_factory
+        try:
+            async with app.router.lifespan_context(app):
+                async with Client(collection_mcp_transport(token, "engineering")) as client:
+                    result = await client.call_tool(
+                        "coyote_execute_tool",
+                        {"tool_id": str(tool.id), "arguments": {"issue": 42}},
+                        raise_on_error=False,
+                    )
+        finally:
+            app.state.mcp_session_factory = original_factory
+
+    assert result.is_error is True
+    assert authorization_headers == []
+
+
+@pytest.mark.asyncio
+async def test_native_collection_endpoint_namespaces_duplicates_and_refreshes_catalog(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        principal, token, tool = await _collection_consumer(session)
+        collection = await session.scalar(select(Collection))
+        assert collection is not None
+        collection.exposure_mode = "native"
+        duplicate_server = await catalog.create_server(
+            session,
+            principal.organization_id,
+            ServerCreate(
+                name="secondary",
+                display_name="Secondary",
+                endpoint=HttpUrl("https://example.com/secondary"),
+            ),
+        )
+        duplicate_server.status = "ready"
+        await catalog.add_membership(
+            session,
+            principal.organization_id,
+            collection.id,
+            MembershipCreate(server_id=duplicate_server.id),
+        )
+        duplicate = Tool(
+            server_id=duplicate_server.id,
+            name=tool.name,
+            description="Secondary lookup",
+            input_schema={"type": "object"},
+            annotations={},
+            fingerprint="b" * 64,
+            active=True,
+            last_seen_at=datetime.now(UTC),
+        )
+        session.add(duplicate)
+        await session.commit()
+
+    original_factory = app.state.mcp_session_factory
+    app.state.mcp_session_factory = session_factory
+    try:
+        async with app.router.lifespan_context(app):
+            async with Client(collection_mcp_transport(token, "engineering")) as client:
+                initial_tools = await client.list_tools()
+                async with session_factory() as session:
+                    await add_catalog_tool(session, tool, "new_lookup")
+                refreshed_tools = await client.list_tools()
+    finally:
+        app.state.mcp_session_factory = original_factory
+
+    assert [tool.name for tool in initial_tools] == [
+        "downstream__issue_lookup",
+        "secondary__issue_lookup",
+    ]
+    assert [tool.name for tool in refreshed_tools] == [
+        "downstream__issue_lookup",
+        "downstream__new_lookup",
+        "secondary__issue_lookup",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_native_collection_endpoint_rejects_published_name_collisions(
+    session: AsyncSession,
+) -> None:
+    principal, token, tool = await _collection_consumer(session)
+    collection = await session.scalar(select(Collection))
+    server = await session.get(MCPServer, tool.server_id)
+    assert collection is not None
+    assert server is not None
+    collection.exposure_mode = "native"
+    server.name = "alpha__beta"
+    tool.name = "gamma"
+    duplicate_server = await catalog.create_server(
+        session,
+        principal.organization_id,
+        ServerCreate(
+            name="alpha",
+            display_name="Alpha",
+            endpoint=HttpUrl("https://example.com/alpha"),
+        ),
+    )
+    duplicate_server.status = "ready"
+    await catalog.add_membership(
+        session,
+        principal.organization_id,
+        collection.id,
+        MembershipCreate(server_id=duplicate_server.id),
+    )
+    session.add(
+        Tool(
+            server_id=duplicate_server.id,
+            name="beta__gamma",
+            description="Colliding tool",
+            input_schema={"type": "object"},
+            annotations={},
+            fingerprint="c" * 64,
+            active=True,
+            last_seen_at=datetime.now(UTC),
+        )
+    )
+    await session.commit()
+    current = await authenticate_token(session, token)
+    assert current is not None
+
+    with pytest.raises(GatewayError, match="names are not unique"):
+        await GatewayService(Settings()).native_tools(session, current, "engineering")
+
+
+@pytest.mark.asyncio
+async def test_native_collection_tool_limit_rejects_partial_publication(
+    session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with session_factory() as session:
+        _, token, tool = await _collection_consumer(session)
+        collection = await session.scalar(select(Collection))
+        assert collection is not None
+        collection.exposure_mode = "native"
+        await add_catalog_tool(session, tool, "second_lookup")
+    monkeypatch.setenv("COYOTE_MAX_NATIVE_TOOLS_PER_COLLECTION", "1")
+
+    original_factory = app.state.mcp_session_factory
+    app.state.mcp_session_factory = session_factory
+    try:
+        async with app.router.lifespan_context(app):
+            async with Client(collection_mcp_transport(token, "engineering")) as client:
+                with pytest.raises(MCPError, match="configured limit"):
+                    await client.list_tools()
+    finally:
+        app.state.mcp_session_factory = original_factory
+
+
+@pytest.mark.asyncio
+async def test_native_collection_endpoint_hides_disabled_and_non_executable_views(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        principal, token, _ = await _collection_consumer(session)
+        collection = await session.scalar(select(Collection))
+        assignment = await session.scalar(
+            select(RoleAssignment).where(RoleAssignment.principal_id == principal.id)
+        )
+        assert collection is not None
+        assert assignment is not None
+        collection.exposure_mode = "native"
+        collection.enabled = False
+        await session.commit()
+
+    original_factory = app.state.mcp_session_factory
+    app.state.mcp_session_factory = session_factory
+    try:
+        async with app.router.lifespan_context(app):
+            async with Client(collection_mcp_transport(token, "engineering")) as client:
+                disabled_tools = await client.list_tools()
+                async with session_factory() as session:
+                    collection = await session.scalar(select(Collection))
+                    assert collection is not None
+                    membership = await session.scalar(
+                        select(CollectionMembership).where(
+                            CollectionMembership.collection_id == collection.id
+                        )
+                    )
+                    assert membership is not None
+                    collection.enabled = True
+                    membership.enabled = False
+                    await session.commit()
+                disabled_membership_tools = await client.list_tools()
+                async with session_factory() as session:
+                    assignment = await session.scalar(
+                        select(RoleAssignment).where(RoleAssignment.principal_id == principal.id)
+                    )
+                    membership = await session.scalar(select(CollectionMembership))
+                    assert assignment is not None
+                    assert membership is not None
+                    membership.enabled = True
+                    assignment.role = "viewer"
+                    await session.commit()
+                unauthorized_tools = await client.list_tools()
+            async with Client(collection_mcp_transport(token, "missing")) as unknown_client:
+                unknown_tools = await unknown_client.list_tools()
+    finally:
+        app.state.mcp_session_factory = original_factory
+
+    assert disabled_tools == []
+    assert disabled_membership_tools == []
+    assert unauthorized_tools == []
+    assert unknown_tools == []
+
+
+@pytest.mark.asyncio
+async def test_collection_endpoint_rejects_revoked_pat(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        _, token, _ = await _collection_consumer(session)
+        current = await authenticate_token(session, token)
+        assert current is not None
+        assert current.token is not None
+        current.token.revoked_at = datetime.now(UTC)
+        await session.commit()
+
+    original_factory = app.state.mcp_session_factory
+    app.state.mcp_session_factory = session_factory
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get(
+                "/mcp/collections/engineering",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    finally:
+        app.state.mcp_session_factory = original_factory
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_native_collection_endpoint_isolates_concurrent_tenants(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        first_principal, first_token, first_tool = await _collection_consumer(session)
+        second_principal, second_token, second_tool = await _collection_consumer(session)
+        first_collection = await session.scalar(
+            select(Collection).where(Collection.organization_id == first_principal.organization_id)
+        )
+        second_collection = await session.scalar(
+            select(Collection).where(Collection.organization_id == second_principal.organization_id)
+        )
+        first_server = await session.get(MCPServer, first_tool.server_id)
+        second_server = await session.get(MCPServer, second_tool.server_id)
+        assert first_collection is not None
+        assert second_collection is not None
+        assert first_server is not None
+        assert second_server is not None
+        first_collection.exposure_mode = "native"
+        second_collection.exposure_mode = "native"
+        first_server.name = "first"
+        second_server.name = "second"
+        await session.commit()
+
+    async def listed_names(token: str) -> list[str]:
+        async with Client(collection_mcp_transport(token, "engineering")) as client:
+            return [tool.name for tool in await client.list_tools()]
+
+    original_factory = app.state.mcp_session_factory
+    app.state.mcp_session_factory = session_factory
+    try:
+        async with app.router.lifespan_context(app):
+            first_names, second_names = await asyncio.gather(
+                listed_names(first_token), listed_names(second_token)
+            )
+    finally:
+        app.state.mcp_session_factory = original_factory
+
+    assert first_names == ["first__issue_lookup"]
+    assert second_names == ["second__issue_lookup"]
 
 
 @pytest.mark.asyncio
