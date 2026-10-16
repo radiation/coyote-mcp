@@ -5,7 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coyote_mcp.models import Collection, CollectionMembership, MCPServer, Tool
-from coyote_mcp.schemas import CollectionCreate, MembershipCreate, ServerCreate
+from coyote_mcp.schemas import CollectionCreate, CollectionUpdate, MembershipCreate, ServerCreate
 
 
 class DuplicateResourceError(ValueError):
@@ -89,6 +89,7 @@ async def create_collection(
         slug=request.slug,
         display_name=request.display_name,
         description=request.description,
+        exposure_mode=request.exposure_mode,
     )
     session.add(collection)
     try:
@@ -96,6 +97,19 @@ async def create_collection(
     except IntegrityError as error:
         await session.rollback()
         raise DuplicateResourceError("A collection with that slug already exists.") from error
+    await session.refresh(collection)
+    return collection
+
+
+async def update_collection(
+    session: AsyncSession,
+    organization_id: UUID,
+    collection_id: UUID,
+    request: CollectionUpdate,
+) -> Collection:
+    collection = await get_collection(session, organization_id, collection_id)
+    collection.exposure_mode = request.exposure_mode
+    await session.commit()
     await session.refresh(collection)
     return collection
 

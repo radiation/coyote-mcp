@@ -1,4 +1,4 @@
-gx-app: &app
+x-app: &app
   build: .
   image: coyote-mcp:local
   working_dir: /app

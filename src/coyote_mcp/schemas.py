@@ -51,6 +51,11 @@ class CollectionCreate(BaseModel):
     slug: str = Field(min_length=1, max_length=160, pattern=r"^[a-z0-9][a-z0-9-]*$")
     display_name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=1000)
+    exposure_mode: Literal["discovery", "native"] = "discovery"
+
+
+class CollectionUpdate(BaseModel):
+    exposure_mode: Literal["discovery", "native"]
 
 
 class MembershipCreate(BaseModel):
@@ -74,6 +79,7 @@ class CollectionResponse(BaseModel):
     display_name: str
     description: str
     enabled: bool
+    exposure_mode: str
     created_at: datetime
     updated_at: datetime
 

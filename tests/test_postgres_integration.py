@@ -59,7 +59,7 @@ async def test_postgres_migration_and_jsonb_persistence(
 ) -> None:
     async with postgres_sessions() as session:
         revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
-        assert revision == "0010"
+        assert revision == "0011"
         organization = Organization(slug="postgres", display_name="PostgreSQL")
         session.add(organization)
         await session.commit()

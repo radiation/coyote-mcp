@@ -4,11 +4,11 @@
 
 | Area | Current responsibility |
 | --- | --- |
-| `app.py` | Builds FastAPI/FastMCP applications, mounts REST/OIDC routes, and authenticates `/mcp` Streamable HTTP requests with PATs only. |
+| `app.py` | Builds FastAPI/FastMCP applications, mounts REST/OIDC routes, authenticates PAT-only MCP requests, and serves global plus request-scoped collection MCP endpoints. |
 | `api.py` | Authenticated control-plane endpoints for catalog, PATs, service principals, identity providers, groups, and mappings. |
 | `catalog.py` | Organization-scoped server, collection, membership, and catalog queries. |
 | `discovery.py` | Streamable HTTP tool discovery, pinned HTTP transport, reconciliation, and generation-safe sync. |
-| `gateway.py` | Persisted-catalog MCP search, description, execution-time authorization snapshots, spawned and resource-bounded schema validation, escaped lexical search, bounded downstream invocation, and result sanitization. |
+| `gateway.py` | Persisted-catalog MCP search, description, collection endpoint publication, execution-time authorization snapshots, spawned and resource-bounded schema validation, escaped lexical search, bounded downstream invocation, and result sanitization. |
 | `auth.py` | PAT/browser authentication, session lifecycle, roles, group mappings, centralized authorization, and batched collection-grant evaluation. |
 | `oidc.py` | OIDC discovery, PKCE login, browser binding, code exchange, ID-token validation, and logout/CSRF flows. |
 | `security.py` | Destination, public-address, scheme, and OIDC trust-boundary validation. |

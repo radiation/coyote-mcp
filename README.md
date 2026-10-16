@@ -266,6 +266,24 @@ aggregation, the HTMX dashboard, pgvector/RAG, and a custom OAuth authorization
 server remain out of scope. Tool annotations are untrusted and do not establish
 safety.
 
+## Phase 3B.1 collection endpoints
+
+`/mcp/collections/{slug}` is a virtual PAT-authenticated endpoint bound to one
+enabled, authorized collection. Collections default to `discovery` exposure,
+which publishes the three universal gateway tools while forcing their collection
+context to the URL slug. `native` exposure publishes the collection's persisted,
+active tools directly under stable `<server-name>__<tool-name>` names and routes
+calls through the same authorization, schema-validation, DNS-pinned downstream
+execution path as `/mcp`.
+
+Native publication requires both `tool:discover` and `tool:execute` for the
+collection. It is rebuilt from the current catalog for every `tools/list` and
+does not query downstream servers. `COYOTE_MAX_NATIVE_TOOLS_PER_COLLECTION`
+defaults to `100`; a larger collection is rejected as a whole, never truncated.
+The installed FastMCP transport does not provide a safe per-principal
+`tools/list_changed` broadcaster, so clients refresh `tools/list` to observe
+catalog, membership, availability, and exposure changes.
+
 ## Local end-to-end smoke test
 
 The optional `smoke` Compose profile starts an internal FastMCP server with

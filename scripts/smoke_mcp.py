@@ -90,9 +90,10 @@ def require_status(response: httpx.Response, expected: int) -> dict[str, Any]:
     return response.json()
 
 
-def mcp_transport(token: str) -> StreamableHttpTransport:
+def mcp_transport(token: str, collection_slug: str | None = None) -> StreamableHttpTransport:
+    path = "/mcp" if collection_slug is None else f"/mcp/collections/{collection_slug}"
     return StreamableHttpTransport(
-        f"{GATEWAY_URL}/mcp", headers={"Authorization": f"Bearer {token}"}
+        f"{GATEWAY_URL}{path}", headers={"Authorization": f"Bearer {token}"}
     )
 
 
@@ -136,7 +137,11 @@ async def run() -> None:
                 await rest.post(
                     "/api/v1/collections",
                     headers=owner_headers,
-                    json={"slug": f"smoke-{suffix[:12]}", "display_name": "Smoke Tools"},
+                    json={
+                        "slug": f"smoke-{suffix[:12]}",
+                        "display_name": "Smoke Tools",
+                        "exposure_mode": "native",
+                    },
                 ),
                 201,
             )
@@ -211,6 +216,19 @@ async def run() -> None:
                 )
                 if downstream_error.data["is_error"] is not True:
                     raise RuntimeError("Downstream tool error was not preserved.")
+
+            async with Client(
+                mcp_transport(credential["token"], collection["slug"])
+            ) as native_client:
+                native_tools = await native_client.list_tools()
+                native_echo_name = f"{server['name']}__echo"
+                if native_echo_name not in {tool.name for tool in native_tools}:
+                    raise RuntimeError("Native collection endpoint did not publish echo.")
+                native_echo = await native_client.call_tool(
+                    native_echo_name, {"message": "native-smoke"}
+                )
+                if native_echo.data != {"message": "native-smoke"}:
+                    raise RuntimeError("Native collection execution returned an unexpected result.")
 
             async with Client(mcp_transport(isolated_token)) as isolated_client:
                 isolated_search = await isolated_client.call_tool(

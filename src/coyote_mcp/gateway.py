@@ -145,6 +145,16 @@ class GatewayTool:
     server_name: str
 
 
+@dataclass(frozen=True)
+class NativeGatewayTool:
+    tool_id: UUID
+    published_name: str
+    description: str
+    input_schema: dict[str, Any]
+    output_schema: dict[str, Any] | None
+    annotations: dict[str, Any]
+
+
 class GatewayService:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -212,6 +222,73 @@ class GatewayService:
             "collection_slug": collection.slug if collection is not None else None,
             "server_name": server.name,
         }
+
+    async def discovery_collection(
+        self, session: AsyncSession, current: AuthenticatedPrincipal, collection_slug: str
+    ) -> Collection:
+        return await self._endpoint_collection(
+            session, current, collection_slug, {"tool:discover"}, "discovery"
+        )
+
+    async def collection_exposure_mode(
+        self, session: AsyncSession, current: AuthenticatedPrincipal, collection_slug: str
+    ) -> str:
+        current = await self._refresh_current(session, current)
+        collection = await session.scalar(
+            select(Collection).where(
+                Collection.organization_id == current.principal.organization_id,
+                Collection.slug == collection_slug,
+                Collection.enabled.is_(True),
+            )
+        )
+        if collection is None or collection.exposure_mode not in {"discovery", "native"}:
+            raise GatewayError("Collection endpoint is not available.")
+        return collection.exposure_mode
+
+    async def native_tools(
+        self, session: AsyncSession, current: AuthenticatedPrincipal, collection_slug: str
+    ) -> list[NativeGatewayTool]:
+        collection = await self._endpoint_collection(
+            session, current, collection_slug, {"tool:discover", "tool:execute"}, "native"
+        )
+        rows = cast(
+            list[tuple[Tool, MCPServer, Collection]],
+            (
+                await session.execute(
+                    self._tool_statement([collection.id]).order_by(
+                        MCPServer.name, Tool.name, Tool.id
+                    )
+                )
+            ).all(),
+        )
+        if len(rows) > self._settings.max_native_tools_per_collection:
+            raise GatewayError("Collection native tool exposure exceeds the configured limit.")
+        native_tools = [
+            NativeGatewayTool(
+                tool_id=tool.id,
+                published_name=f"{server.name}__{tool.name}",
+                description=tool.description,
+                input_schema=dict(tool.input_schema),
+                output_schema=dict(tool.output_schema) if tool.output_schema is not None else None,
+                annotations=dict(tool.annotations),
+            )
+            for tool, server, _ in rows
+        ]
+        if len({tool.published_name for tool in native_tools}) != len(native_tools):
+            raise GatewayError("Collection native tool names are not unique.")
+        return native_tools
+
+    async def native_tool(
+        self,
+        session: AsyncSession,
+        current: AuthenticatedPrincipal,
+        collection_slug: str,
+        published_name: str,
+    ) -> NativeGatewayTool:
+        for tool in await self.native_tools(session, current, collection_slug):
+            if tool.published_name == published_name:
+                return tool
+        raise GatewayError("Tool is not available.")
 
     async def execute_tool(
         self,
@@ -312,6 +389,37 @@ class GatewayService:
         )
         return [collection for collection in collections if collection.id in authorized_ids]
 
+    async def _endpoint_collection(
+        self,
+        session: AsyncSession,
+        current: AuthenticatedPrincipal,
+        collection_slug: str,
+        required_actions: set[str],
+        exposure_mode: str,
+    ) -> Collection:
+        current = await self._refresh_current(session, current)
+        authorized_ids: set[UUID] | None = None
+        collections: list[Collection] = []
+        for action in required_actions:
+            collections = await self._authorized_collections(
+                session, current, action, collection_slug
+            )
+            action_ids = {collection.id for collection in collections}
+            authorized_ids = action_ids if authorized_ids is None else authorized_ids & action_ids
+        if not authorized_ids:
+            raise GatewayError("Collection endpoint is not available.")
+        collection = next(
+            (
+                candidate
+                for candidate in collections
+                if candidate.id in authorized_ids and candidate.exposure_mode == exposure_mode
+            ),
+            None,
+        )
+        if collection is None:
+            raise GatewayError("Collection endpoint is not available.")
+        return collection
+
     def _tool_statement(
         self, collection_ids: list[UUID]
     ) -> Select[tuple[Tool, MCPServer, Collection]]:
@@ -357,6 +465,25 @@ class GatewayService:
             raise GatewayError("Tool is not available.")
         tool, server = row
 
+        if collection_slug is not None:
+            collections = await self._authorized_collections(
+                session, current, action, collection_slug
+            )
+            if not collections:
+                raise GatewayError("Tool is not available.")
+            collection = collections[0]
+            membership = await session.scalar(
+                select(CollectionMembership).where(
+                    CollectionMembership.collection_id == collection.id,
+                    CollectionMembership.server_id == server.id,
+                    CollectionMembership.organization_id == current.principal.organization_id,
+                    CollectionMembership.enabled.is_(True),
+                )
+            )
+            if membership is None:
+                raise GatewayError("Tool is not available.")
+            return tool, server, collection
+
         organization_decision = await authorize(
             session,
             current.principal,
@@ -367,24 +494,7 @@ class GatewayService:
         )
         if organization_decision.allowed:
             return tool, server, None
-
-        if collection_slug is None:
-            raise GatewayError("Collection context is required for this tool.")
-        collections = await self._authorized_collections(session, current, action, collection_slug)
-        if not collections:
-            raise GatewayError("Tool is not available.")
-        collection = collections[0]
-        membership = await session.scalar(
-            select(CollectionMembership).where(
-                CollectionMembership.collection_id == collection.id,
-                CollectionMembership.server_id == server.id,
-                CollectionMembership.organization_id == current.principal.organization_id,
-                CollectionMembership.enabled.is_(True),
-            )
-        )
-        if membership is None:
-            raise GatewayError("Tool is not available.")
-        return tool, server, collection
+        raise GatewayError("Collection context is required for this tool.")
 
     async def _validate_arguments(self, schema: dict[str, Any], arguments: dict[str, Any]) -> None:
         result = await asyncio.to_thread(

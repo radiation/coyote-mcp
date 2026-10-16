@@ -22,6 +22,14 @@
   I/O, avoiding held registry connections; downstream structured results
   preserve explicit JSON null values. Unscoped discovery batches tenant-scoped
   collection grant evaluation before result limiting.
+- **Phase 3B.1:** Virtual PAT-authenticated collection endpoints support bound
+  progressive discovery and direct native publication from the persisted
+  catalog. Native publication requires discovery plus execution authorization,
+  uses stable server-qualified names, reloads on every `tools/list`, and fails
+  closed when its configurable collection tool limit is exceeded. The current
+  FastMCP transport lacks a safe per-principal `tools/list_changed` broadcast;
+  refresh is the implemented update mechanism. Renaming a server changes its
+  published native tool names until Phase 3B.2 introduces aliases.
 - **Quality and security infrastructure:** Python 3.14/uv, Ruff, strict mypy,
   pytest branch coverage (80% minimum), PostgreSQL integration tests, Docker
   Compose development, Dependabot, CI, and CodeQL configuration.
