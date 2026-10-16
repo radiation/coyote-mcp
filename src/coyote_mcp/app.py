@@ -71,6 +71,7 @@ async def coyote_search_tools(
         {
             "tool_id": str(tool.tool_id),
             "name": tool.name,
+            "published_name": tool.published_name,
             "description": tool.description,
             "collection_slug": tool.collection_slug,
             "server_name": tool.server_name,

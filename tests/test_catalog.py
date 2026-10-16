@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from uuid import uuid4
 
 import pytest
 
@@ -6,7 +7,14 @@ from coyote_mcp import catalog
 from coyote_mcp.auth import AuthenticatedPrincipal
 from coyote_mcp.discovery import DiscoveredTool, DiscoveryService, SyncFailedError, reconcile_tools
 from coyote_mcp.models import Organization, Principal, RoleAssignment, Tool
-from coyote_mcp.schemas import CollectionCreate, CollectionUpdate, MembershipCreate, ServerCreate
+from coyote_mcp.schemas import (
+    CollectionCreate,
+    CollectionUpdate,
+    MembershipCreate,
+    PublicationCreate,
+    PublicationUpdate,
+    ServerCreate,
+)
 from coyote_mcp.settings import Settings
 
 
@@ -135,6 +143,45 @@ async def test_collection_update_enforces_scope_and_authorization(
     )
 
     assert updated.exposure_mode == "native"
+
+
+@pytest.mark.asyncio
+async def test_publication_services_enforce_scope_and_authorization(
+    session, organization: Organization
+) -> None:
+    principal = Principal(
+        organization_id=organization.id,
+        identifier="untrusted-publisher",
+        display_name="Untrusted Publisher",
+    )
+    session.add(principal)
+    await session.flush()
+    collection = await catalog.create_collection(
+        session,
+        organization.id,
+        CollectionCreate(slug="engineering", display_name="Engineering"),
+    )
+    no_scope = AuthenticatedPrincipal(principal, frozenset(), None)
+    scoped_but_unauthorized = AuthenticatedPrincipal(
+        principal, frozenset({"collection:update"}), None
+    )
+    publication_request = PublicationCreate(tool_id=uuid4(), published_name="curated_lookup")
+
+    for current in (no_scope, scoped_but_unauthorized):
+        with pytest.raises(catalog.AuthorizationError, match="Insufficient permissions"):
+            await catalog.list_publications(session, current, collection.id, 10, 0)
+        with pytest.raises(catalog.AuthorizationError, match="Insufficient permissions"):
+            await catalog.publish_tool(session, current, collection.id, publication_request)
+        with pytest.raises(catalog.AuthorizationError, match="Insufficient permissions"):
+            await catalog.update_publication(
+                session,
+                current,
+                collection.id,
+                uuid4(),
+                PublicationUpdate(enabled=False),
+            )
+        with pytest.raises(catalog.AuthorizationError, match="Insufficient permissions"):
+            await catalog.remove_publication(session, current, collection.id, uuid4())
 
 
 @pytest.mark.asyncio

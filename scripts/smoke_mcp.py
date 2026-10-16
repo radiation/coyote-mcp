@@ -153,6 +153,27 @@ async def run() -> None:
                 ),
                 201,
             )
+            available_tools = require_status(
+                await rest.get(
+                    f"/api/v1/collections/{collection['id']}/tools", headers=owner_headers
+                ),
+                200,
+            )
+            tools_by_name = {tool["name"]: tool for tool in available_tools}
+            if not {"echo", "add", "fail"}.issubset(tools_by_name):
+                raise RuntimeError("Synchronized catalog did not include expected smoke tools.")
+            publications = {
+                name: require_status(
+                    await rest.post(
+                        f"/api/v1/collections/{collection['id']}/publications",
+                        headers=owner_headers,
+                        json={"tool_id": tool["id"], "published_name": f"curated_{name}"},
+                    ),
+                    201,
+                )
+                for name, tool in tools_by_name.items()
+                if name in {"echo", "add", "fail"}
+            }
             principal = require_status(
                 await rest.post(
                     "/api/v1/service-principals",
@@ -221,7 +242,7 @@ async def run() -> None:
                 mcp_transport(credential["token"], collection["slug"])
             ) as native_client:
                 native_tools = await native_client.list_tools()
-                native_echo_name = f"{server['name']}__echo"
+                native_echo_name = publications["echo"]["published_name"]
                 if native_echo_name not in {tool.name for tool in native_tools}:
                     raise RuntimeError("Native collection endpoint did not publish echo.")
                 native_echo = await native_client.call_tool(
@@ -229,6 +250,14 @@ async def run() -> None:
                 )
                 if native_echo.data != {"message": "native-smoke"}:
                     raise RuntimeError("Native collection execution returned an unexpected result.")
+                unpublished = await rest.delete(
+                    f"/api/v1/collections/{collection['id']}/publications/{publications['echo']['id']}",
+                    headers=owner_headers,
+                )
+                if unpublished.status_code != 204:
+                    raise RuntimeError("Unable to unpublish the native echo tool.")
+                if native_echo_name in {tool.name for tool in await native_client.list_tools()}:
+                    raise RuntimeError("Unpublished native tool remained visible.")
 
             async with Client(mcp_transport(isolated_token)) as isolated_client:
                 isolated_search = await isolated_client.call_tool(

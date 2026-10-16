@@ -66,3 +66,53 @@ Documentation is part of the deliverable, not a separate follow-up task.
 - Clearly distinguish implemented functionality from planned functionality. Never describe unfinished features as operational.
 - Keep documentation changes in the same PR as the corresponding implementation.
 - Before completing a task, review whether these documents need updating. If no changes are necessary, explicitly state that in the completion summary.
+
+## Development Workflow and Validation
+
+### Agent execution policy
+
+- Work directly in the current session. **Do not spawn sub-agents or delegate work** unless explicitly requested.
+- Favor focused, incremental changes over large, multi-stage implementations.
+- Inspect relevant code and documentation before making changes, but avoid unnecessary repository-wide exploration.
+- Do not launch background tasks, development servers, or containers unless explicitly requested.
+- Leave existing development services and container state unchanged.
+- Do not commit, push, or open pull requests unless explicitly requested.
+
+### Validation responsibilities
+
+The coding agent is responsible for fast, targeted validation:
+
+- Run Ruff linting and formatting checks.
+- Run strict mypy against affected code.
+- Run focused unit tests for changed functionality.
+- Run `git diff --check`.
+- Update relevant documentation when architectural behavior changes.
+
+**Do not automatically run:**
+
+- Full pytest or coverage suites
+- PostgreSQL integration suites
+- Docker Compose builds, startup, or smoke tests
+- Live MCP client/server integration tests
+- Repeated migration or database rebuilds
+
+These are reserved for manual acceptance testing unless explicitly requested.
+
+### Completion reporting
+
+At the end of each implementation, provide:
+
+1. A concise summary of changes.
+2. Files or subsystems modified.
+3. Targeted validation performed, including pass/fail results.
+4. Tests intentionally deferred to manual validation.
+5. Exact commands for running deferred tests.
+6. Known limitations, risks, or follow-up work.
+
+Never claim that deferred tests passed.
+
+### Exceptions
+
+If a change cannot be validated meaningfully without database integration, Docker, or another normally deferred operation, explain the limitation and provide the required command rather than automatically running it.
+
+If explicitly instructed to perform full validation, the request overrides these defaults.

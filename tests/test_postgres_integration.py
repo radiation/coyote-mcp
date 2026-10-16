@@ -3,18 +3,33 @@ import os
 from collections.abc import AsyncIterator
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from coyote_mcp import catalog
+from coyote_mcp.auth import AuthenticatedPrincipal
 from coyote_mcp.discovery import (
     DiscoveredTool,
     DiscoveryService,
     SyncSupersededError,
+    reconcile_tools,
 )
-from coyote_mcp.models import MCPServer, Organization, Tool
-from coyote_mcp.schemas import ServerCreate
+from coyote_mcp.models import (
+    Collection,
+    CollectionToolPublication,
+    MCPServer,
+    Organization,
+    Principal,
+    RoleAssignment,
+    Tool,
+)
+from coyote_mcp.schemas import (
+    CollectionCreate,
+    MembershipCreate,
+    PublicationCreate,
+    ServerCreate,
+)
 from coyote_mcp.settings import Settings
 
 POSTGRES_INTEGRATION_URL = os.environ.get("POSTGRES_INTEGRATION_URL")
@@ -53,13 +68,35 @@ def discovered_tool(name: str) -> DiscoveredTool:
     )
 
 
+async def publication_current(
+    session: AsyncSession, organization: Organization, collection: Collection
+) -> AuthenticatedPrincipal:
+    principal = Principal(
+        organization_id=organization.id,
+        identifier="publication-administrator",
+        display_name="Publication Administrator",
+    )
+    session.add(principal)
+    await session.flush()
+    session.add(
+        RoleAssignment(
+            organization_id=organization.id,
+            principal_id=principal.id,
+            role="administrator",
+            collection_id=collection.id,
+        )
+    )
+    await session.commit()
+    return AuthenticatedPrincipal(principal, frozenset({"collection:update"}), None)
+
+
 @pytest.mark.asyncio
 async def test_postgres_migration_and_jsonb_persistence(
     postgres_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     async with postgres_sessions() as session:
         revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
-        assert revision == "0011"
+        assert revision == "0012"
         organization = Organization(slug="postgres", display_name="PostgreSQL")
         session.add(organization)
         await session.commit()
@@ -81,6 +118,72 @@ async def test_postgres_migration_and_jsonb_persistence(
         )
 
     assert persisted_type == "jsonb"
+
+
+@pytest.mark.asyncio
+async def test_postgres_publication_survives_catalog_sync(
+    postgres_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    async with postgres_sessions() as session:
+        organization = Organization(slug="postgres", display_name="PostgreSQL")
+        session.add(organization)
+        await session.commit()
+        server = await catalog.create_server(session, organization.id, server_request())
+        collection = await catalog.create_collection(
+            session,
+            organization.id,
+            CollectionCreate(slug="native", display_name="Native", exposure_mode="native"),
+        )
+        await catalog.add_membership(
+            session, organization.id, collection.id, MembershipCreate(server_id=server.id)
+        )
+        await reconcile_tools(session, server, [discovered_tool("published")])
+        await session.commit()
+        tool = await session.scalar(select(Tool).where(Tool.name == "published"))
+        assert tool is not None
+        current = await publication_current(session, organization, collection)
+        publication = await catalog.publish_tool(
+            session,
+            current,
+            collection.id,
+            PublicationCreate(tool_id=tool.id, published_name="stable_published"),
+        )
+        await reconcile_tools(session, server, [discovered_tool("published")])
+        await session.commit()
+        persisted = await session.scalar(
+            select(CollectionToolPublication).where(CollectionToolPublication.id == publication.id)
+        )
+
+    assert persisted is not None
+    assert persisted.published_name == "stable_published"
+    assert persisted.enabled is True
+
+
+@pytest.mark.asyncio
+async def test_postgres_catalog_sync_does_not_publish_tools(
+    postgres_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    async with postgres_sessions() as session:
+        organization = Organization(slug="postgres", display_name="PostgreSQL")
+        session.add(organization)
+        await session.commit()
+        server = await catalog.create_server(session, organization.id, server_request())
+        collection = await catalog.create_collection(
+            session,
+            organization.id,
+            CollectionCreate(slug="native", display_name="Native", exposure_mode="native"),
+        )
+        await catalog.add_membership(
+            session, organization.id, collection.id, MembershipCreate(server_id=server.id)
+        )
+        await reconcile_tools(session, server, [discovered_tool("unpublished")])
+        await session.commit()
+        current = await publication_current(session, organization, collection)
+        publications = await catalog.list_publications(
+            session, current, collection.id, limit=10, offset=0
+        )
+
+    assert publications == []
 
 
 @pytest.mark.asyncio

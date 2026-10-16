@@ -22,14 +22,16 @@
   I/O, avoiding held registry connections; downstream structured results
   preserve explicit JSON null values. Unscoped discovery batches tenant-scoped
   collection grant evaluation before result limiting.
-- **Phase 3B.1:** Virtual PAT-authenticated collection endpoints support bound
-  progressive discovery and direct native publication from the persisted
-  catalog. Native publication requires discovery plus execution authorization,
-  uses stable server-qualified names, reloads on every `tools/list`, and fails
-  closed when its configurable collection tool limit is exceeded. The current
-  FastMCP transport lacks a safe per-principal `tools/list_changed` broadcast;
-  refresh is the implemented update mechanism. Renaming a server changes its
-  published native tool names until Phase 3B.2 introduces aliases.
+- **Phase 3B.2:** Virtual PAT-authenticated collection endpoints support bound
+  progressive discovery and curated native publication from the persisted
+  catalog. Native collections default-deny newly synchronized tools and expose
+  only enabled collection tool-publication records with stable administrator
+  aliases and optional description overrides. Global and collection-bound
+  progressive discovery, listing, description, and invocation share the same
+  publication check; synchronization never publishes tools implicitly. The
+  additive `0012` migration creates only the publication schema, so collections
+  require explicit curation after migration. The current FastMCP transport lacks a safe per-principal
+  `tools/list_changed` broadcast; refresh is the implemented update mechanism.
 - **Quality and security infrastructure:** Python 3.14/uv, Ruff, strict mypy,
   pytest branch coverage (80% minimum), PostgreSQL integration tests, Docker
   Compose development, Dependabot, CI, and CodeQL configuration.
@@ -43,8 +45,8 @@
 
 - **Phase 3B:** Downstream credential integration, audit events, cancellation,
   and operational metrics for MCP execution.
-- **Phase 3C:** Fine-grained tool policy, selective native aggregation, and
-  richer discovery without weakening the persisted-catalog boundary.
+- **Phase 3C:** Per-principal fine-grained tool policy, richer discovery, and
+  semantic search without weakening the persisted-catalog boundary.
 - **Later:** An HTMX operator console and semantic/search-based progressive
   discovery while preserving the database registry and policy model.
 

@@ -1,6 +1,6 @@
 from collections.abc import AsyncIterator
-from datetime import timedelta
-from uuid import uuid4
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from coyote_mcp.app import app
 from coyote_mcp.auth import ALL_ACTIONS, authenticate_token, issue_pat
 from coyote_mcp.db import get_session
-from coyote_mcp.models import Organization, Principal, RoleAssignment
+from coyote_mcp.models import Organization, Principal, RoleAssignment, Tool
 from coyote_mcp.settings import Settings
 
 
@@ -139,6 +139,114 @@ async def test_collection_and_server_catalog_endpoints(
     assert collection_tools.json() == []
     assert deleted.status_code == 204
     assert collection_without_membership.json()["memberships"] == []
+
+
+@pytest.mark.asyncio
+async def test_collection_publication_management_endpoints(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        headers = await credentials(session_factory)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            server = await client.post(
+                "/api/v1/servers",
+                headers=headers,
+                json={
+                    "name": "published",
+                    "display_name": "Published",
+                    "endpoint": "https://example.com/mcp",
+                },
+            )
+            collection = await client.post(
+                "/api/v1/collections",
+                headers=headers,
+                json={"slug": "published", "display_name": "Published", "exposure_mode": "native"},
+            )
+            collection_id = collection.json()["id"]
+            await client.post(
+                f"/api/v1/collections/{collection_id}/servers",
+                headers=headers,
+                json={"server_id": server.json()["id"]},
+            )
+            async with session_factory() as session:
+                tools = [
+                    Tool(
+                        server_id=UUID(server.json()["id"]),
+                        name=name,
+                        description=name,
+                        input_schema={"type": "object"},
+                        annotations={},
+                        fingerprint=name.ljust(64, "0"),
+                        active=True,
+                        last_seen_at=datetime.now(UTC),
+                    )
+                    for name in ("first", "second")
+                ]
+                session.add_all(tools)
+                await session.commit()
+                first_tool_id, second_tool_id = (str(tool.id) for tool in tools)
+
+            available = await client.get(
+                f"/api/v1/collections/{collection_id}/tools", headers=headers
+            )
+            published = await client.post(
+                f"/api/v1/collections/{collection_id}/publications",
+                headers=headers,
+                json={"tool_id": first_tool_id, "published_name": "curated_first"},
+            )
+            collision = await client.post(
+                f"/api/v1/collections/{collection_id}/publications",
+                headers=headers,
+                json={"tool_id": second_tool_id, "published_name": "curated_first"},
+            )
+            publication_id = published.json()["id"]
+            updated = await client.patch(
+                f"/api/v1/collections/{collection_id}/publications/{publication_id}",
+                headers=headers,
+                json={"description_override": "Curated first tool", "enabled": False},
+            )
+            null_enabled = await client.patch(
+                f"/api/v1/collections/{collection_id}/publications/{publication_id}",
+                headers=headers,
+                json={"enabled": None},
+            )
+            null_name = await client.patch(
+                f"/api/v1/collections/{collection_id}/publications/{publication_id}",
+                headers=headers,
+                json={"published_name": None},
+            )
+            cleared_override = await client.patch(
+                f"/api/v1/collections/{collection_id}/publications/{publication_id}",
+                headers=headers,
+                json={"description_override": None},
+            )
+            listed = await client.get(
+                f"/api/v1/collections/{collection_id}/publications", headers=headers
+            )
+            deleted = await client.delete(
+                f"/api/v1/collections/{collection_id}/publications/{publication_id}",
+                headers=headers,
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert [item["name"] for item in available.json()] == ["first", "second"]
+    assert published.status_code == 201
+    assert collision.status_code == 409
+    assert updated.json()["enabled"] is False
+    assert updated.json()["description_override"] == "Curated first tool"
+    assert null_enabled.status_code == 422
+    assert null_name.status_code == 422
+    assert cleared_override.json()["description_override"] is None
+    assert [item["published_name"] for item in listed.json()] == ["curated_first"]
+    assert deleted.status_code == 204
 
 
 @pytest.mark.asyncio

@@ -5,8 +5,21 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coyote_mcp.auth import AuthenticatedPrincipal, authorize
-from coyote_mcp.models import Collection, CollectionMembership, MCPServer, Tool
-from coyote_mcp.schemas import CollectionCreate, CollectionUpdate, MembershipCreate, ServerCreate
+from coyote_mcp.models import (
+    Collection,
+    CollectionMembership,
+    CollectionToolPublication,
+    MCPServer,
+    Tool,
+)
+from coyote_mcp.schemas import (
+    CollectionCreate,
+    CollectionUpdate,
+    MembershipCreate,
+    PublicationCreate,
+    PublicationUpdate,
+    ServerCreate,
+)
 
 
 class DuplicateResourceError(ValueError):
@@ -112,6 +125,17 @@ async def update_collection(
     collection_id: UUID,
     request: CollectionUpdate,
 ) -> Collection:
+    collection = await require_collection_update(session, current, collection_id)
+
+    collection.exposure_mode = request.exposure_mode
+    await session.commit()
+    await session.refresh(collection)
+    return collection
+
+
+async def require_collection_update(
+    session: AsyncSession, current: AuthenticatedPrincipal, collection_id: UUID
+) -> Collection:
     collection = await get_collection(session, current.principal.organization_id, collection_id)
     if "collection:update" not in current.scopes:
         raise AuthorizationError("Insufficient permissions.")
@@ -125,9 +149,6 @@ async def update_collection(
     )
     if not decision.allowed:
         raise AuthorizationError("Insufficient permissions.")
-    collection.exposure_mode = request.exposure_mode
-    await session.commit()
-    await session.refresh(collection)
     return collection
 
 
@@ -214,3 +235,118 @@ async def list_collection_tools(
             )
         ).all()
     )
+
+
+async def list_publications(
+    session: AsyncSession,
+    current: AuthenticatedPrincipal,
+    collection_id: UUID,
+    limit: int,
+    offset: int,
+) -> list[CollectionToolPublication]:
+    await require_collection_update(session, current, collection_id)
+    return list(
+        (
+            await session.scalars(
+                select(CollectionToolPublication)
+                .join(Collection, Collection.id == CollectionToolPublication.collection_id)
+                .where(
+                    CollectionToolPublication.collection_id == collection_id,
+                    Collection.organization_id == current.principal.organization_id,
+                )
+                .order_by(CollectionToolPublication.published_name, CollectionToolPublication.id)
+                .limit(limit)
+                .offset(offset)
+            )
+        ).all()
+    )
+
+
+async def publish_tool(
+    session: AsyncSession,
+    current: AuthenticatedPrincipal,
+    collection_id: UUID,
+    request: PublicationCreate,
+) -> CollectionToolPublication:
+    await require_collection_update(session, current, collection_id)
+    row = await session.execute(
+        select(Tool, CollectionMembership)
+        .join(MCPServer, MCPServer.id == Tool.server_id)
+        .join(
+            CollectionMembership,
+            (CollectionMembership.server_id == Tool.server_id)
+            & (CollectionMembership.collection_id == collection_id),
+        )
+        .where(
+            Tool.id == request.tool_id,
+            MCPServer.organization_id == current.principal.organization_id,
+        )
+    )
+    result = row.one_or_none()
+    if result is None:
+        raise MissingResourceError("Catalog tool not found in this collection.")
+    tool, membership = result
+    publication = CollectionToolPublication(
+        collection_id=collection_id,
+        server_id=membership.server_id,
+        tool_id=tool.id,
+        enabled=request.enabled,
+        published_name=request.published_name,
+        description_override=request.description_override,
+    )
+    session.add(publication)
+    try:
+        await session.commit()
+    except IntegrityError as error:
+        await session.rollback()
+        raise DuplicateResourceError(
+            "A publication already uses that tool or published name."
+        ) from error
+    await session.refresh(publication)
+    return publication
+
+
+async def update_publication(
+    session: AsyncSession,
+    current: AuthenticatedPrincipal,
+    collection_id: UUID,
+    publication_id: UUID,
+    request: PublicationUpdate,
+) -> CollectionToolPublication:
+    await require_collection_update(session, current, collection_id)
+    publication = await session.scalar(
+        select(CollectionToolPublication).where(
+            CollectionToolPublication.id == publication_id,
+            CollectionToolPublication.collection_id == collection_id,
+        )
+    )
+    if publication is None:
+        raise MissingResourceError("Tool publication not found.")
+    for field, value in request.model_dump(exclude_unset=True).items():
+        setattr(publication, field, value)
+    try:
+        await session.commit()
+    except IntegrityError as error:
+        await session.rollback()
+        raise DuplicateResourceError("A publication already uses that published name.") from error
+    await session.refresh(publication)
+    return publication
+
+
+async def remove_publication(
+    session: AsyncSession,
+    current: AuthenticatedPrincipal,
+    collection_id: UUID,
+    publication_id: UUID,
+) -> None:
+    await require_collection_update(session, current, collection_id)
+    publication = await session.scalar(
+        select(CollectionToolPublication).where(
+            CollectionToolPublication.id == publication_id,
+            CollectionToolPublication.collection_id == collection_id,
+        )
+    )
+    if publication is None:
+        raise MissingResourceError("Tool publication not found.")
+    await session.delete(publication)
+    await session.commit()

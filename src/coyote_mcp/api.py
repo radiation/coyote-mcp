@@ -48,6 +48,9 @@ from coyote_mcp.schemas import (
     PATCreatedResponse,
     PATResponse,
     PrincipalResponse,
+    PublicationCreate,
+    PublicationResponse,
+    PublicationUpdate,
     ServerCreate,
     ServerResponse,
     ServicePATCreate,
@@ -313,6 +316,86 @@ async def collection_tools(
             page_params.offset,
         )
         return [ToolResponse.model_validate(tool) for tool in tools]
+    except catalog.MissingResourceError as error:
+        raise resource_not_found(error) from error
+
+
+@router.get("/collections/{collection_id}/publications", response_model=list[PublicationResponse])
+async def collection_publications(
+    collection_id: UUID, page_params: PageParams, session: Session, current: Current
+) -> list[PublicationResponse]:
+    try:
+        collection = await catalog.get_collection(
+            session, current.principal.organization_id, collection_id
+        )
+        await require(session, current, "collection:update", collection)
+        publications = await catalog.list_publications(
+            session, current, collection_id, page_params.limit, page_params.offset
+        )
+        return [PublicationResponse.model_validate(publication) for publication in publications]
+    except catalog.MissingResourceError as error:
+        raise resource_not_found(error) from error
+
+
+@router.post(
+    "/collections/{collection_id}/publications",
+    response_model=PublicationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def publish_collection_tool(
+    collection_id: UUID, request: PublicationCreate, session: Session, current: Current
+) -> PublicationResponse:
+    try:
+        collection = await catalog.get_collection(
+            session, current.principal.organization_id, collection_id
+        )
+        await require(session, current, "collection:update", collection)
+        publication = await catalog.publish_tool(session, current, collection_id, request)
+        return PublicationResponse.model_validate(publication)
+    except catalog.MissingResourceError as error:
+        raise resource_not_found(error) from error
+    except catalog.DuplicateResourceError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+
+@router.patch(
+    "/collections/{collection_id}/publications/{publication_id}", response_model=PublicationResponse
+)
+async def update_collection_publication(
+    collection_id: UUID,
+    publication_id: UUID,
+    request: PublicationUpdate,
+    session: Session,
+    current: Current,
+) -> PublicationResponse:
+    try:
+        collection = await catalog.get_collection(
+            session, current.principal.organization_id, collection_id
+        )
+        await require(session, current, "collection:update", collection)
+        publication = await catalog.update_publication(
+            session, current, collection_id, publication_id, request
+        )
+        return PublicationResponse.model_validate(publication)
+    except catalog.MissingResourceError as error:
+        raise resource_not_found(error) from error
+    except catalog.DuplicateResourceError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+
+@router.delete(
+    "/collections/{collection_id}/publications/{publication_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_collection_publication(
+    collection_id: UUID, publication_id: UUID, session: Session, current: Current
+) -> None:
+    try:
+        collection = await catalog.get_collection(
+            session, current.principal.organization_id, collection_id
+        )
+        await require(session, current, "collection:update", collection)
+        await catalog.remove_publication(session, current, collection_id, publication_id)
     except catalog.MissingResourceError as error:
         raise resource_not_found(error) from error
 
