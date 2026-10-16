@@ -184,6 +184,9 @@ class GatewayService:
             .where(
                 Tool.name.ilike(f"%{normalized_query}%", escape=_LIKE_ESCAPE)
                 | Tool.description.ilike(f"%{normalized_query}%", escape=_LIKE_ESCAPE)
+                | CollectionToolPublication.description_override.ilike(
+                    f"%{normalized_query}%", escape=_LIKE_ESCAPE
+                )
                 | CollectionToolPublication.published_name.ilike(
                     f"%{normalized_query}%", escape=_LIKE_ESCAPE
                 )

@@ -125,6 +125,17 @@ async def update_collection(
     collection_id: UUID,
     request: CollectionUpdate,
 ) -> Collection:
+    collection = await require_collection_update(session, current, collection_id)
+
+    collection.exposure_mode = request.exposure_mode
+    await session.commit()
+    await session.refresh(collection)
+    return collection
+
+
+async def require_collection_update(
+    session: AsyncSession, current: AuthenticatedPrincipal, collection_id: UUID
+) -> Collection:
     collection = await get_collection(session, current.principal.organization_id, collection_id)
     if "collection:update" not in current.scopes:
         raise AuthorizationError("Insufficient permissions.")
@@ -138,9 +149,6 @@ async def update_collection(
     )
     if not decision.allowed:
         raise AuthorizationError("Insufficient permissions.")
-    collection.exposure_mode = request.exposure_mode
-    await session.commit()
-    await session.refresh(collection)
     return collection
 
 
@@ -230,9 +238,13 @@ async def list_collection_tools(
 
 
 async def list_publications(
-    session: AsyncSession, organization_id: UUID, collection_id: UUID, limit: int, offset: int
+    session: AsyncSession,
+    current: AuthenticatedPrincipal,
+    collection_id: UUID,
+    limit: int,
+    offset: int,
 ) -> list[CollectionToolPublication]:
-    await get_collection(session, organization_id, collection_id)
+    await require_collection_update(session, current, collection_id)
     return list(
         (
             await session.scalars(
@@ -240,7 +252,7 @@ async def list_publications(
                 .join(Collection, Collection.id == CollectionToolPublication.collection_id)
                 .where(
                     CollectionToolPublication.collection_id == collection_id,
-                    Collection.organization_id == organization_id,
+                    Collection.organization_id == current.principal.organization_id,
                 )
                 .order_by(CollectionToolPublication.published_name, CollectionToolPublication.id)
                 .limit(limit)
@@ -252,11 +264,11 @@ async def list_publications(
 
 async def publish_tool(
     session: AsyncSession,
-    organization_id: UUID,
+    current: AuthenticatedPrincipal,
     collection_id: UUID,
     request: PublicationCreate,
 ) -> CollectionToolPublication:
-    await get_collection(session, organization_id, collection_id)
+    await require_collection_update(session, current, collection_id)
     row = await session.execute(
         select(Tool, CollectionMembership)
         .join(MCPServer, MCPServer.id == Tool.server_id)
@@ -265,7 +277,10 @@ async def publish_tool(
             (CollectionMembership.server_id == Tool.server_id)
             & (CollectionMembership.collection_id == collection_id),
         )
-        .where(Tool.id == request.tool_id, MCPServer.organization_id == organization_id)
+        .where(
+            Tool.id == request.tool_id,
+            MCPServer.organization_id == current.principal.organization_id,
+        )
     )
     result = row.one_or_none()
     if result is None:
@@ -293,12 +308,12 @@ async def publish_tool(
 
 async def update_publication(
     session: AsyncSession,
-    organization_id: UUID,
+    current: AuthenticatedPrincipal,
     collection_id: UUID,
     publication_id: UUID,
     request: PublicationUpdate,
 ) -> CollectionToolPublication:
-    await get_collection(session, organization_id, collection_id)
+    await require_collection_update(session, current, collection_id)
     publication = await session.scalar(
         select(CollectionToolPublication).where(
             CollectionToolPublication.id == publication_id,
@@ -319,9 +334,12 @@ async def update_publication(
 
 
 async def remove_publication(
-    session: AsyncSession, organization_id: UUID, collection_id: UUID, publication_id: UUID
+    session: AsyncSession,
+    current: AuthenticatedPrincipal,
+    collection_id: UUID,
+    publication_id: UUID,
 ) -> None:
-    await get_collection(session, organization_id, collection_id)
+    await require_collection_update(session, current, collection_id)
     publication = await session.scalar(
         select(CollectionToolPublication).where(
             CollectionToolPublication.id == publication_id,

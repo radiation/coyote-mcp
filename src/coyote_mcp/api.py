@@ -330,11 +330,7 @@ async def collection_publications(
         )
         await require(session, current, "collection:update", collection)
         publications = await catalog.list_publications(
-            session,
-            current.principal.organization_id,
-            collection_id,
-            page_params.limit,
-            page_params.offset,
+            session, current, collection_id, page_params.limit, page_params.offset
         )
         return [PublicationResponse.model_validate(publication) for publication in publications]
     except catalog.MissingResourceError as error:
@@ -354,9 +350,7 @@ async def publish_collection_tool(
             session, current.principal.organization_id, collection_id
         )
         await require(session, current, "collection:update", collection)
-        publication = await catalog.publish_tool(
-            session, current.principal.organization_id, collection_id, request
-        )
+        publication = await catalog.publish_tool(session, current, collection_id, request)
         return PublicationResponse.model_validate(publication)
     except catalog.MissingResourceError as error:
         raise resource_not_found(error) from error
@@ -380,7 +374,7 @@ async def update_collection_publication(
         )
         await require(session, current, "collection:update", collection)
         publication = await catalog.update_publication(
-            session, current.principal.organization_id, collection_id, publication_id, request
+            session, current, collection_id, publication_id, request
         )
         return PublicationResponse.model_validate(publication)
     except catalog.MissingResourceError as error:
@@ -401,9 +395,7 @@ async def delete_collection_publication(
             session, current.principal.organization_id, collection_id
         )
         await require(session, current, "collection:update", collection)
-        await catalog.remove_publication(
-            session, current.principal.organization_id, collection_id, publication_id
-        )
+        await catalog.remove_publication(session, current, collection_id, publication_id)
     except catalog.MissingResourceError as error:
         raise resource_not_found(error) from error
 

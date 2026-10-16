@@ -25,3 +25,13 @@ available.
 Keep docs/ai-context/ and docs/architecture-guardrails.md synchronized with 
 implementation changes, updating current-priorities.md after meaningful milestones. 
 Documentation updates belong in the same PR.
+
+## Development workflow
+
+Follow the agent execution and validation policies in
+[AGENTS.md](../AGENTS.md).
+
+By default, do not spawn sub-agents or run full test suites,
+Docker Compose, live smoke tests, or PostgreSQL integration tests.
+Perform focused validation and provide commands for manual
+acceptance testing instead.

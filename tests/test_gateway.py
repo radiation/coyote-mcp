@@ -139,6 +139,10 @@ async def add_catalog_tool(session: AsyncSession, source_tool: Tool, name: str) 
     return tool
 
 
+def publication_current(principal: Principal) -> AuthenticatedPrincipal:
+    return AuthenticatedPrincipal(principal, frozenset({"collection:update"}), None)
+
+
 async def _collection_consumer(
     session: AsyncSession,
 ) -> tuple[Principal, str, Tool]:
@@ -172,7 +176,7 @@ async def _collection_consumer(
         RoleAssignment(
             organization_id=organization.id,
             principal_id=principal.id,
-            role="consumer",
+            role="administrator",
             collection_id=collection.id,
         )
     )
@@ -199,7 +203,7 @@ async def _collection_consumer(
     await session.refresh(tool)
     await catalog.publish_tool(
         session,
-        organization.id,
+        publication_current(principal),
         collection.id,
         PublicationCreate(tool_id=tool.id, published_name="downstream__issue_lookup"),
     )
@@ -207,7 +211,7 @@ async def _collection_consumer(
         session,
         principal,
         "consumer",
-        {"tool:discover", "tool:describe", "tool:execute"},
+        {"collection:update", "tool:discover", "tool:describe", "tool:execute"},
         timedelta(days=1),
         Settings(),
     )
@@ -230,6 +234,16 @@ async def test_gateway_scoped_discovery_description_and_schema_validation(
         (tool.id, "engineering")
     ]
     assert description["input_schema"] == tool.input_schema
+    publication = await session.scalar(select(CollectionToolPublication))
+    assert publication is not None
+    publication.description_override = "Find an invoice"
+    await session.commit()
+    scoped_override_results = await service.search_tools(
+        session, current, "invoice", "engineering", 10
+    )
+    global_override_results = await service.search_tools(session, current, "invoice", None, 10)
+    assert [result.tool_id for result in scoped_override_results] == [tool.id]
+    assert [result.tool_id for result in global_override_results] == [tool.id]
     global_description = await service.describe_tool(session, current, tool.id, None)
     assert global_description["collection_slug"] == "engineering"
     with pytest.raises(GatewayError, match="arguments"):
@@ -259,7 +273,7 @@ async def test_global_gateway_default_denies_unpublished_tools(session: AsyncSes
     assert current is not None
     assert publication is not None
     await catalog.remove_publication(
-        session, principal.organization_id, publication.collection_id, publication.id
+        session, publication_current(principal), publication.collection_id, publication.id
     )
 
     assert await GatewayService(Settings()).search_tools(session, current, "lookup", None, 10) == []
@@ -295,6 +309,14 @@ async def test_global_gateway_requires_context_for_multiple_publications(
             collection_id=None,
         )
     )
+    session.add(
+        RoleAssignment(
+            organization_id=principal.organization_id,
+            principal_id=principal.id,
+            role="administrator",
+            collection_id=second_collection.id,
+        )
+    )
     await session.commit()
     current = await authenticate_token(session, token)
     assert current is not None
@@ -304,7 +326,7 @@ async def test_global_gateway_requires_context_for_multiple_publications(
         await service.execute_tool(session, current, tool.id, {}, "operations")
     await catalog.publish_tool(
         session,
-        principal.organization_id,
+        publication_current(principal),
         second_collection.id,
         PublicationCreate(tool_id=tool.id, published_name="operations_lookup"),
     )
@@ -629,7 +651,7 @@ async def test_native_collection_endpoint_namespaces_duplicates_and_refreshes_ca
         await session.commit()
         await catalog.publish_tool(
             session,
-            principal.organization_id,
+            publication_current(principal),
             collection.id,
             PublicationCreate(tool_id=duplicate.id, published_name="secondary__issue_lookup"),
         )
@@ -675,7 +697,7 @@ async def test_native_collection_aliases_are_stable_and_unique(
     with pytest.raises(catalog.DuplicateResourceError):
         await catalog.publish_tool(
             session,
-            principal.organization_id,
+            publication_current(principal),
             collection.id,
             PublicationCreate(tool_id=tool.id, published_name="curated_lookup"),
         )
@@ -726,7 +748,7 @@ async def test_native_collection_tool_limit_rejects_partial_publication(
         second_tool = await add_catalog_tool(session, tool, "second_lookup")
         await catalog.publish_tool(
             session,
-            principal.organization_id,
+            publication_current(principal),
             collection.id,
             PublicationCreate(tool_id=second_tool.id, published_name="downstream__second_lookup"),
         )
@@ -847,10 +869,24 @@ async def test_native_collection_endpoint_isolates_concurrent_tenants(
         assert second_collection is not None
         assert first_server is not None
         assert second_server is not None
+        first_publication = await session.scalar(
+            select(CollectionToolPublication).where(
+                CollectionToolPublication.collection_id == first_collection.id
+            )
+        )
+        second_publication = await session.scalar(
+            select(CollectionToolPublication).where(
+                CollectionToolPublication.collection_id == second_collection.id
+            )
+        )
+        assert first_publication is not None
+        assert second_publication is not None
         first_collection.exposure_mode = "native"
         second_collection.exposure_mode = "native"
         first_server.name = "first"
         second_server.name = "second"
+        first_publication.published_name = "first__issue_lookup"
+        second_publication.published_name = "second__issue_lookup"
         await session.commit()
 
     async def listed_names(token: str) -> list[str]:
@@ -867,8 +903,8 @@ async def test_native_collection_endpoint_isolates_concurrent_tenants(
     finally:
         app.state.mcp_session_factory = original_factory
 
-    assert first_names == ["downstream__issue_lookup"]
-    assert second_names == ["downstream__issue_lookup"]
+    assert first_names == ["first__issue_lookup"]
+    assert second_names == ["second__issue_lookup"]
 
 
 @pytest.mark.asyncio
@@ -890,7 +926,7 @@ async def test_gateway_preserves_tool_errors_and_enforces_execution_limits(
         for published_tool in (failing_tool, delayed_tool, large_tool, nullable_tool):
             await catalog.publish_tool(
                 session,
-                principal.organization_id,
+                publication_current(principal),
                 collection.id,
                 PublicationCreate(
                     tool_id=published_tool.id, published_name=f"downstream__{published_tool.name}"

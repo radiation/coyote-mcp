@@ -8,13 +8,22 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from coyote_mcp import catalog
+from coyote_mcp.auth import AuthenticatedPrincipal
 from coyote_mcp.discovery import (
     DiscoveredTool,
     DiscoveryService,
     SyncSupersededError,
     reconcile_tools,
 )
-from coyote_mcp.models import CollectionToolPublication, MCPServer, Organization, Tool
+from coyote_mcp.models import (
+    Collection,
+    CollectionToolPublication,
+    MCPServer,
+    Organization,
+    Principal,
+    RoleAssignment,
+    Tool,
+)
 from coyote_mcp.schemas import (
     CollectionCreate,
     MembershipCreate,
@@ -57,6 +66,28 @@ def discovered_tool(name: str) -> DiscoveredTool:
         output_schema={"type": "string"},
         annotations={"readOnlyHint": True},
     )
+
+
+async def publication_current(
+    session: AsyncSession, organization: Organization, collection: Collection
+) -> AuthenticatedPrincipal:
+    principal = Principal(
+        organization_id=organization.id,
+        identifier="publication-administrator",
+        display_name="Publication Administrator",
+    )
+    session.add(principal)
+    await session.flush()
+    session.add(
+        RoleAssignment(
+            organization_id=organization.id,
+            principal_id=principal.id,
+            role="administrator",
+            collection_id=collection.id,
+        )
+    )
+    await session.commit()
+    return AuthenticatedPrincipal(principal, frozenset({"collection:update"}), None)
 
 
 @pytest.mark.asyncio
@@ -110,9 +141,10 @@ async def test_postgres_publication_survives_catalog_sync(
         await session.commit()
         tool = await session.scalar(select(Tool).where(Tool.name == "published"))
         assert tool is not None
+        current = await publication_current(session, organization, collection)
         publication = await catalog.publish_tool(
             session,
-            organization.id,
+            current,
             collection.id,
             PublicationCreate(tool_id=tool.id, published_name="stable_published"),
         )
@@ -146,8 +178,9 @@ async def test_postgres_catalog_sync_does_not_publish_tools(
         )
         await reconcile_tools(session, server, [discovered_tool("unpublished")])
         await session.commit()
+        current = await publication_current(session, organization, collection)
         publications = await catalog.list_publications(
-            session, organization.id, collection.id, limit=10, offset=0
+            session, current, collection.id, limit=10, offset=0
         )
 
     assert publications == []
