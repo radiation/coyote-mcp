@@ -1,9 +1,13 @@
 import asyncio
 import os
 from collections.abc import AsyncIterator
+from pathlib import Path
+from uuid import uuid4
 
 import httpx
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -39,6 +43,7 @@ from coyote_mcp.settings import Settings
 
 POSTGRES_INTEGRATION_URL = os.environ.get("POSTGRES_INTEGRATION_URL")
 pytestmark = pytest.mark.postgres
+ALEMBIC_CONFIG = Path(__file__).parents[1] / "alembic.ini"
 
 
 @pytest.fixture
@@ -77,7 +82,8 @@ async def publication_current(
     session: AsyncSession, organization: Organization, collection: Collection
 ) -> AuthenticatedPrincipal:
     principal = Principal(
-        identifier="publication-administrator", display_name="Publication Administrator"
+        identifier=f"publication-administrator-{uuid4().hex}",
+        display_name="Publication Administrator",
     )
     session.add(principal)
     await session.flush()
@@ -102,7 +108,9 @@ async def test_postgres_migration_and_jsonb_persistence(
 ) -> None:
     async with postgres_sessions() as session:
         revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
-        assert revision == "0014"
+        assert (
+            revision == ScriptDirectory.from_config(Config(str(ALEMBIC_CONFIG))).get_current_head()
+        )
         organization = Organization(slug="postgres", display_name="PostgreSQL")
         session.add(organization)
         await session.commit()
