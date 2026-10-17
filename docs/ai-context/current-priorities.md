@@ -5,9 +5,9 @@
 - **Phase 1:** PostgreSQL-backed registration of Streamable HTTP MCP servers,
   generation-safe tool discovery, persisted catalog, and collections.
 - **Phase 2:** Organization-scoped roles and PATs; service principals;
-  enterprise OIDC identities, provider-scoped group mappings, server-side
-  browser sessions, browser-bound OIDC transactions, and provider-bound client
-  secret references.
+  enterprise OIDC identities, organization-scoped group mappings, server-side
+  browser sessions, browser-bound OIDC transactions, and environment-injected
+  client secrets.
 - **Phase 3A:** PAT-authenticated FastMCP Streamable HTTP endpoint with
   universal PostgreSQL-backed search, description, and execution. Every MCP
   operation re-evaluates current authorization; collection-scoped execution is
@@ -38,8 +38,42 @@
 - **Local smoke coverage:** An optional Compose-only FastMCP mock and a live
   runner validate registration, sync, authenticated MCP discovery/description/
   execution, structured tool failures, tenant isolation, revoked-PAT denial,
-  and temporary tenant cleanup. The profile uses hostname-specific private HTTP
-  destination allowlists rather than broad SSRF development overrides.
+  and temporary tenant cleanup. The runner provisions globally unique service
+  principals with explicit owner memberships and organization-bound PATs. The
+  profile uses hostname-specific private HTTP destination allowlists rather
+  than broad SSRF development overrides.
+- **Phase 4A:** A Jinja2/HTMX administration console provides an
+  organization-scoped registry overview, persisted server-health list,
+  browser-session-only authentication, centralized RBAC page checks, responsive
+  dark styling, and placeholders for future management pages. Its shell exposes
+  an active-session organization chooser for membership switching and
+  instance-admin department creation. It has no separate credential path.
+- **Phase 4A.1:** Global principals, explicit enabled organization memberships,
+  server-side active browser-session organization selection, one environment-
+  configured OIDC provider, instance administrators, and immutable request
+  organization context are implemented. Migration `0013` is intentionally
+  destructive for identity, role, credential, session, and provider data; it
+  preserves organizations and catalog data. Configure OIDC settings, bind an instance
+  administrator, and recreate memberships and roles after applying it.
+- **OIDC schema correction:** Migration `0014` removes legacy database-provider
+  coupling by rebuilding transient browser-session and login-transaction tables
+  plus greenfield group mappings. It preserves global external identities and
+  their `(issuer, subject)` binding while invalidating existing browser sessions,
+  pending OIDC logins, and group-role mappings.
+- **Organization bootstrap correction:** Migration `0015` removes the untouched
+  legacy `default` seed, while preserving a default department with dependent
+  data. Fresh deployments therefore begin without departments until an instance
+  administrator creates one.
+- **Organization role uniqueness correction:** Migration `0016` scopes
+  organization-wide role uniqueness by principal, organization, and role. A
+  global instance administrator can therefore receive an owner role when
+  creating each new department.
+- **Phase 4A instance administration:** Enabled instance administrators are
+  browser-session superusers for every enabled organization and can recover
+  ownerless departments without synthetic memberships or owner roles. They can
+  select any department and create new ones; creation atomically grants the new
+  department's owner membership and role. PATs remain single-department and MCP
+  discovery/execution remains membership- and publication-gated.
 
 ## Next
 
@@ -47,7 +81,7 @@
   and operational metrics for MCP execution.
 - **Phase 3C:** Per-principal fine-grained tool policy, richer discovery, and
   semantic search without weakening the persisted-catalog boundary.
-- **Later:** An HTMX operator console and semantic/search-based progressive
+- **Later:** Console CRUD workflows and semantic/search-based progressive
   discovery while preserving the database registry and policy model.
 
 ## Open technical decisions

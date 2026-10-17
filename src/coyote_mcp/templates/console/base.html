@@ -1,0 +1,38 @@
+{% import "console/components.html" as components %}
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ page_title }} | coyote-mcp</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='console.css') }}">
+    <script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js" defer></script>
+  </head>
+  <body hx-boost="true" hx-target="#console-content" hx-push-url="true">
+    <a class="skip-link" href="#console-content">Skip to content</a>
+    <div class="console-shell">
+      <aside class="sidebar" aria-label="Console navigation">
+        <a class="brand" href="{{ url_for('overview') }}">coyote-mcp</a>
+        <nav>
+          {{ components.navigation_item('Overview', 'overview', url_for('overview'), active_navigation|default('')) }}
+          {{ components.navigation_item('MCP Servers', 'servers', url_for('placeholder', page_name='servers'), active_navigation|default('')) }}
+          {{ components.navigation_item('Collections', 'collections', url_for('placeholder', page_name='collections'), active_navigation|default('')) }}
+          {{ components.navigation_item('Tool Catalog', 'tools', url_for('placeholder', page_name='tools'), active_navigation|default('')) }}
+          {{ components.navigation_item('Publications', 'publications', url_for('placeholder', page_name='publications'), active_navigation|default('')) }}
+          {{ components.navigation_item('Principals & Roles', 'principals', url_for('placeholder', page_name='principals'), active_navigation|default('')) }}
+          {{ components.navigation_item('API Tokens', 'tokens', url_for('placeholder', page_name='tokens'), active_navigation|default('')) }}
+          <a class="navigation-item" href="{{ url_for('organization_selection') }}" hx-boost="false">Switch organization</a>
+        </nav>
+      </aside>
+      <div class="workspace">
+        <header class="topbar">
+          <div><span class="eyebrow">Organization</span><strong>{{ organization_name|default('Organization') }}</strong></div>
+          <div class="principal"><span class="eyebrow">Signed in as</span><strong>{{ current.principal.display_name }}</strong></div>
+        </header>
+        <main id="console-content" class="content" tabindex="-1">
+          {% block content %}{% endblock %}
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

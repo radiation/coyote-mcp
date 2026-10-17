@@ -136,7 +136,7 @@ async def update_collection(
 async def require_collection_update(
     session: AsyncSession, current: AuthenticatedPrincipal, collection_id: UUID
 ) -> Collection:
-    collection = await get_collection(session, current.principal.organization_id, collection_id)
+    collection = await get_collection(session, current.require_organization_id(), collection_id)
     if "collection:update" not in current.scopes:
         raise AuthorizationError("Insufficient permissions.")
     decision = await authorize(
@@ -145,7 +145,7 @@ async def require_collection_update(
         "collection:update",
         collection,
         verified_group_ids=current.verified_group_ids,
-        identity_provider_id=current.identity_provider_id,
+        credential_context=current.credential_context,
     )
     if not decision.allowed:
         raise AuthorizationError("Insufficient permissions.")
@@ -252,7 +252,7 @@ async def list_publications(
                 .join(Collection, Collection.id == CollectionToolPublication.collection_id)
                 .where(
                     CollectionToolPublication.collection_id == collection_id,
-                    Collection.organization_id == current.principal.organization_id,
+                    Collection.organization_id == current.require_organization_id(),
                 )
                 .order_by(CollectionToolPublication.published_name, CollectionToolPublication.id)
                 .limit(limit)
@@ -279,7 +279,7 @@ async def publish_tool(
         )
         .where(
             Tool.id == request.tool_id,
-            MCPServer.organization_id == current.principal.organization_id,
+            MCPServer.organization_id == current.require_organization_id(),
         )
     )
     result = row.one_or_none()

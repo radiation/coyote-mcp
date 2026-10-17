@@ -2,11 +2,12 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
+from pydantic import HttpUrl
 
 from coyote_mcp import catalog
 from coyote_mcp.auth import AuthenticatedPrincipal
 from coyote_mcp.discovery import DiscoveredTool, DiscoveryService, SyncFailedError, reconcile_tools
-from coyote_mcp.models import Organization, Principal, RoleAssignment, Tool
+from coyote_mcp.models import Organization, OrganizationMembership, Principal, RoleAssignment, Tool
 from coyote_mcp.schemas import (
     CollectionCreate,
     CollectionUpdate,
@@ -19,7 +20,11 @@ from coyote_mcp.settings import Settings
 
 
 def server_request(name: str = "example") -> ServerCreate:
-    return ServerCreate(name=name, display_name=name.title(), endpoint="https://example.com/mcp")
+    return ServerCreate(
+        name=name,
+        display_name=name.title(),
+        endpoint=HttpUrl("https://example.com/mcp"),
+    )
 
 
 def discovered_tool(name: str, description: str = "A tool") -> DiscoveredTool:
@@ -98,25 +103,25 @@ async def test_collection_update_enforces_scope_and_authorization(
     session, organization: Organization
 ) -> None:
     principal = Principal(
-        organization_id=organization.id,
         identifier="maintainer",
         display_name="Maintainer",
     )
     session.add(principal)
     await session.flush()
+    session.add(OrganizationMembership(organization_id=organization.id, principal_id=principal.id))
     collection = await catalog.create_collection(
         session,
         organization.id,
         CollectionCreate(slug="engineering", display_name="Engineering"),
     )
-    no_scope = AuthenticatedPrincipal(principal, frozenset(), None)
+    no_scope = AuthenticatedPrincipal(principal, frozenset(), None, organization.id)
     with pytest.raises(catalog.AuthorizationError, match="Insufficient permissions"):
         await catalog.update_collection(
             session, no_scope, collection.id, CollectionUpdate(exposure_mode="native")
         )
 
     scoped_but_unauthorized = AuthenticatedPrincipal(
-        principal, frozenset({"collection:update"}), None
+        principal, frozenset({"collection:update"}), None, organization.id
     )
     with pytest.raises(catalog.AuthorizationError, match="Insufficient permissions"):
         await catalog.update_collection(
@@ -150,20 +155,20 @@ async def test_publication_services_enforce_scope_and_authorization(
     session, organization: Organization
 ) -> None:
     principal = Principal(
-        organization_id=organization.id,
         identifier="untrusted-publisher",
         display_name="Untrusted Publisher",
     )
     session.add(principal)
     await session.flush()
+    session.add(OrganizationMembership(organization_id=organization.id, principal_id=principal.id))
     collection = await catalog.create_collection(
         session,
         organization.id,
         CollectionCreate(slug="engineering", display_name="Engineering"),
     )
-    no_scope = AuthenticatedPrincipal(principal, frozenset(), None)
+    no_scope = AuthenticatedPrincipal(principal, frozenset(), None, organization.id)
     scoped_but_unauthorized = AuthenticatedPrincipal(
-        principal, frozenset({"collection:update"}), None
+        principal, frozenset({"collection:update"}), None, organization.id
     )
     publication_request = PublicationCreate(tool_id=uuid4(), published_name="curated_lookup")
 

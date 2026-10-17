@@ -1,5 +1,6 @@
 import ipaddress
 import socket
+from collections.abc import Collection
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -63,7 +64,7 @@ def validate_endpoint(endpoint: str, settings: Settings) -> None:
 
 
 def validate_oidc_endpoint(
-    endpoint: str, issuer: str, trusted_hosts: list[str], settings: Settings
+    endpoint: str, issuer: str, trusted_hosts: Collection[str], settings: Settings
 ) -> ResolvedEndpoint:
     parsed = urlparse(endpoint)
     issuer_parsed = urlparse(issuer)

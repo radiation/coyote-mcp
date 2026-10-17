@@ -13,18 +13,35 @@ header takes precedence over a browser session. Browser sessions are opaque,
 HTTP-only, HTTPS outside development, CSRF-protected for mutation, persisted in
 PostgreSQL, expiring, and revocable.
 
-OIDC uses discovery, PKCE S256, state, nonce, token signature/issuer/audience/
+OIDC uses exactly one instance provider configured through validated environment
+settings, discovery, PKCE S256, state, nonce, token signature/issuer/audience/
 expiry validation, and a single-use transaction bound to an initiating-browser
-cookie. Provider client secrets use a constrained environment-reference pattern;
-ID tokens and refresh tokens are not persisted.
+cookie. Missing or invalid settings fail closed. The client secret is injected
+through settings; ID tokens and refresh tokens are not persisted. The privileged CLI records a trusted `(issuer, subject)` instance
+administrator binding; normal browser authentication always validates OIDC
+claims before it issues a session.
 
 ## Authorization and tenancy
 
-Authorization is centralized in `auth.authorize`, default-deny, and scoped to
-the principal's organization. Roles can be organization-wide or collection-wide.
+Authorization is centralized in `auth.authorize`, default-deny, and scoped to an
+immutable organization context carried by the authenticated request, never by
+the global `Principal` ORM object. Authorization rechecks enabled principals and
+organizations. Ordinary principals also require enabled explicit membership and
+organization or collection roles. An enabled global `InstanceAdministrator` is
+the centralized browser-session superuser override and may select and administer
+any enabled organization, including an ownerless organization, without synthetic
+memberships or roles. Its CSRF-protected organization creation transaction adds
+an enabled membership and owner role only in the new organization. Ordinary
+authenticated users are denied when they call the creation or selection paths
+outside their memberships.
+PAT authentication remains organization-bound, requires an enabled membership,
+and retains explicit PAT scopes plus organization-role evaluation; instance-admin
+status does not elevate a PAT or create a cross-organization PAT.
+MCP collection authorization remains membership- and publication-gated, so an
+instance-administrator PAT cannot discover or execute unpublished tools.
 PAT scopes further attenuate permissions. External identities use issuer plus
 subject, not email. Groups are taken from validated ID-token claims and evaluated
-only for mappings owned by the authenticating identity provider.
+against organization-scoped mappings.
 
 ## Network safety and limitations
 

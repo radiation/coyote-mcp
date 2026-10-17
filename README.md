@@ -44,21 +44,12 @@ installations must apply the migration before starting the app:
 uv run alembic upgrade head
 ```
 
-No privileged credential is created during startup or migration. Bootstrap the
-initial owner once, after migrations complete:
-
-```bash
-uv run coyote-mcp bootstrap-admin
-# Or in Compose:
-docker compose run --rm app uv run coyote-mcp bootstrap-admin
-```
-
-The command prints a bearer token exactly once and refuses to generate another
-owner or bootstrap token after success. Store it in an approved secret manager.
-Lost administrator access requires a deliberate break-glass database recovery
-performed by an operator: create or re-enable a principal, assign `owner` within
-the configured organization, and issue a replacement credential through the
-same audited operational procedure. There is no application backdoor.
+No privileged credential is created during startup or migration. Establish the
+initial instance administrator through the trusted OIDC issuer/subject binding
+described in [Enterprise identity](#enterprise-identity). Issue PATs only through
+an authenticated administrative flow and store them in an approved secret
+manager. Lost administrator access requires a deliberate break-glass database
+recovery performed by an operator. There is no application backdoor.
 
 All `/api/v1` catalog and management endpoints now require a PAT:
 
@@ -96,82 +87,92 @@ checks remain unauthenticated. Phase 2A does not include OIDC, group
 synchronization, OAuth token exchange, ABAC/policy DSLs, administration UI, or
 MCP tool execution routing.
 
-## Phase 2B enterprise identity
+## Enterprise identity
 
-Phase 2B adds organization-scoped OpenID Connect configuration, external identity
-bindings, verified-group role mappings, and managed service principals. Apply the
-additive migration before configuring an identity provider:
+Each deployment uses one enterprise OpenID Connect provider. It is configured
+only through settings, not through a database record or control-plane API. For
+local development, copy `.env.example` to `.env` and set these values:
+
+```dotenv
+OIDC_ISSUER=https://login.example.com
+OIDC_CLIENT_ID=replace-with-client-id
+OIDC_CLIENT_SECRET=replace-with-client-secret
+OIDC_REDIRECT_URI=http://localhost:8000/auth/oidc/callback
+```
+
+Register the exact `OIDC_REDIRECT_URI` with the provider. The deployed callback
+route is always `/auth/oidc/callback`; settings reject a URI with another path,
+a query string, or a fragment. Production injects the same `OIDC_*` settings
+through its secret manager, uses an HTTPS issuer and callback, and must set a
+high-entropy `SESSION_SECRET_KEY` of at least 32 characters. `.env` is ignored
+by Git and must never be committed. For local development with the callback at
+`http://localhost:8000/auth/oidc/callback`, begin login at
+`http://localhost:8000`, not `http://127.0.0.1:8000`: the browser-binding cookie
+is host-only and is intentionally not shared between those origins.
+
+Optional settings are `OIDC_ALLOWED_ORGANIZATION`, `OIDC_GROUP_CLAIM`,
+`OIDC_TRUSTED_ENDPOINT_HOSTS` (a JSON list), and
+`OIDC_JIT_PROVISIONING_ENABLED`. Trusted endpoint hosts are only needed when a
+provider's discovery metadata references a host other than the issuer host.
+
+Apply migrations, then record the trusted issuer/subject binding for the first
+instance administrator:
 
 ```bash
 uv run alembic upgrade head
+uv run coyote-mcp bootstrap-instance-admin \
+  --issuer https://login.example.com \
+  --subject <trusted-subject>
 ```
 
-An owner configures an OIDC provider through the control-plane API. Each
-organization currently has at most one enabled provider (the schema supports
-multiple provider records for a future selection policy). Configure its issuer,
-client ID, optional group claim, optional provider organization claim, and a
-client-secret binding of `env:auto`. The application derives a provider- and
-organization-specific reference such as
-`env:COYOTE_OIDC_CLIENT_SECRET_<ORG_UUID>_<PROVIDER_UUID>`; an operator must
-populate that exact environment variable in the deployment secret manager.
-Arbitrary environment references are rejected, so an organization owner cannot
-cause another deployment secret to be sent to a token endpoint. The application
-never persists raw client secrets, ID tokens, or refresh tokens.
+Fresh deployments have no organizations after migration. The bootstrapped
+instance administrator creates the first department from `/console`.
 
-Users begin login at `/auth/oidc/{organization-slug}/login`. The authorization
-code exchange uses PKCE S256, state, and nonce. Discovery metadata and JWKS are
-retrieved from the configured issuer; the application validates signature,
-issuer, audience, expiry, subject, and nonce before establishing a session.
-Production deployments must set `ENVIRONMENT` to a non-development value and
-provide a high-entropy `SESSION_SECRET_KEY` of at least 32 characters; startup
-rejects the development fallback secret outside development. Session cookies then
-require HTTPS, are HTTP-only, and use `SameSite=Lax`. Browser session mutations,
-including logout, require the `X-CSRF-Token` value stored in the session. Bearer
+This operator-only command does not validate an OIDC assertion and never emits a
+browser credential or PAT. Normal browser login begins at `/auth/oidc/login` and
+validates the OIDC assertion before issuing a session.
+
+After the bootstrapped administrator signs in at `/console`, they can select any
+enabled organization and use the CSRF-protected form to create a department.
+Instance administrators administer enabled organizations without synthetic
+memberships or owner roles, which supports ownerless-department recovery.
+Creation atomically grants the new department's enabled membership and
+organization-scoped `owner` role, then selects it in the server-side browser
+session. Ordinary authenticated users can select only their enabled memberships
+and cannot use the creation endpoint directly. PATs remain scoped to a single
+organization, and MCP discovery/execution still requires explicit publication.
+
+The authorization-code exchange uses PKCE S256, state, and nonce. Discovery
+metadata and JWKS are retrieved from the configured issuer; the application
+validates the signature, issuer, audience, expiry, subject, and nonce before
+establishing a session. Missing or invalid OIDC settings fail closed. Browser
+session cookies are opaque, HTTP-only, `SameSite=Lax`, and server-side; session
+mutations, including logout, require the stored `X-CSRF-Token`. Bearer
 authentication takes precedence whenever an `Authorization` header is present:
 an invalid bearer token returns `401` and never falls back to a browser session.
 Browser sessions are not accepted by MCP; the protocol endpoint requires a PAT.
 
-External accounts are bound immutably by `(organization, issuer, subject)`.
-Email is display metadata only and is never used to link accounts. Set
-`jit_provisioning_enabled` only when first-login provisioning is intended:
-provisioned humans receive no roles. Disabled mapped principals cannot log in.
+External accounts are bound immutably by `(issuer, subject)`. Email is display
+metadata only and is never used to link accounts. Users receive access through
+explicit organization memberships, RBAC assignments, or validated group-claim
+mappings. Set `OIDC_JIT_PROVISIONING_ENABLED` only when first-login provisioning
+is intended; provisioned humans receive no roles. Disabled principals,
+organizations, or memberships cannot authenticate into an organization.
 
 External group IDs come only from the validated ID-token group claim. Map a
-stable provider group ID to one or more built-in roles at organization or
+stable external group ID to one or more built-in roles at organization or
 collection scope; direct principal assignments continue to work alongside those
-mappings. Group-derived access is evaluated for the authenticated session only.
-If the provider signals overage/incomplete claims or the configured group claim
-is absent/malformed, group-derived access fails closed; direct assignments are
-unaffected. Changes take effect at the next successful login or session expiry
-(eight hours by default), so administrators should use short session lifetimes
-where group removal must take effect quickly. Browser sessions are persisted in
-PostgreSQL and the cookie contains only an opaque, hashed-verifier token; it
-contains no principal details, group IDs, CSRF material, or OIDC tokens. Sessions
-expire, update activity on use, rotate on successful login, are revoked on
-logout, and are rejected immediately when their principal is disabled. OIDC
-state, nonce, and PKCE verifier are stored in a separate short-lived,
-single-use transaction that is atomically consumed by the callback and bound to
-an initiating-browser HttpOnly cookie. This prevents a callback initiated in one
-browser from establishing a session in another. Session activity is persisted at
-most once every five minutes while expiry and revocation are checked on every
-request. Obtain a
-fresh CSRF value from `GET /auth/oidc/csrf` before session-authenticated
-state-changing requests. SCIM and directory synchronization are deliberately
-deferred.
+mappings. Group-derived access fails closed when claims are absent, malformed,
+or marked incomplete. Browser sessions persist only a hashed opaque verifier,
+active organization, and CSRF material; they never persist ID or refresh tokens.
+OIDC state, nonce, and PKCE verifier are stored in a separate short-lived,
+single-use transaction bound to an initiating-browser HttpOnly cookie.
 
-OIDC discovery, authorization, token, and JWKS URLs must be HTTPS unless both
-development mode and explicit local OIDC overrides are enabled. Every endpoint
-must resolve to a public address (unless the local override is set), redirects
-are disabled, requests are DNS-pinned, and endpoints must use the issuer host or
-an explicitly configured `trusted_endpoint_hosts` entry. This prevents discovery
-metadata from redirecting credentials to an unrelated host while still allowing
-an approved enterprise provider boundary.
-
-External groups are identity-provider scoped. The same external group ID can be
-mapped separately for different providers, but a verified claim is evaluated
-only against mappings for the provider that authenticated the session. Legacy
-groups that cannot be unambiguously backfilled to one provider remain unbound
-and therefore grant no group-derived access.
+OIDC discovery, authorization, token, and JWKS URLs must be HTTPS except for
+explicit local development overrides. Every endpoint must resolve to a public
+address unless the local override is enabled; redirects are disabled and
+requests are DNS-pinned. Endpoints must use the issuer host or an explicitly
+configured trusted endpoint host.
 
 Owners can create, list, disable, and revoke scoped PATs for service principals.
 Service principals use `identity_type=service` and are distinct from user
@@ -300,6 +301,28 @@ The installed FastMCP transport does not provide a safe per-principal
 `tools/list_changed` broadcaster, so clients refresh `tools/list` to observe
 catalog, membership, availability, and exposure changes.
 
+## Phase 4A administration console
+
+`/console` is a read-only, server-rendered administration console. It uses the
+existing server-side browser session and centralized RBAC evaluation; it does
+not accept PAT bearer credentials and has no separate login mechanism. An
+unauthenticated request redirects to `/console/login`, which forwards a supplied
+organization slug to the existing `/auth/oidc/login` flow.
+
+The overview requires both `server:read` and `collection:read`, and returns
+organization-scoped aggregate counts for registered and ready servers, active
+catalog tools, collections, and enabled publications. It also shows recent
+server health from persisted registry data. The other console destinations
+(`servers`, `collections`, `tools`, `publications`, `principals`, and `tokens`)
+are RBAC-protected placeholders for later CRUD phases.
+
+Console pages are complete HTML responses by default. Requests with the HTMX
+`HX-Request: true` header receive only the main-content fragment, so future
+table and form interactions can update `#console-content` without replacing the
+shell. HTMX is loaded from the version-pinned
+`https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js` URL; update the explicit
+version deliberately when upgrading it. There is no Node build pipeline.
+
 ## Local end-to-end smoke test
 
 The optional `smoke` Compose profile starts an internal FastMCP server with
@@ -324,13 +347,8 @@ can no longer establish an MCP session. Temporary resources are deleted in a
 `finally` block; the runner never prints bearer tokens. It requires the local
 PostgreSQL port exposed by Compose and uses `DATABASE_URL` if supplied.
 
-For a manual MCP Inspector session, first bootstrap an owner PAT once:
-
-```bash
-docker compose run --rm app uv run coyote-mcp bootstrap-admin
-```
-
-Configure MCP Inspector with Streamable HTTP URL
+For a manual MCP Inspector session, provision a PAT through an authenticated
+administrative flow. Configure MCP Inspector with Streamable HTTP URL
 `http://127.0.0.1:8000/mcp` and an `Authorization: Bearer <PAT>` header. The
 mock server is test-only and is not a downstream-authentication or Phase 3B
 exercise.
@@ -413,7 +431,8 @@ CI status check as required (and optionally require the branch to be up to date)
 
 - Tool execution routing
 - Search, embedding index, and collection filtering
-- HTMX dashboard (Jinja2 is provisioned only)
+- Console CRUD workflows for servers, collections, publications, principals,
+  tokens, and identity providers
 - Metrics, audits, and production hardening
 
 Discovery currently supports Streamable HTTP only. Catalog results come from the

@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -28,7 +28,7 @@ from coyote_mcp.models import (
     CollectionMembership,
     ExternalGroup,
     GroupRoleMapping,
-    IdentityProvider,
+    OrganizationMembership,
     PersonalAccessToken,
     Principal,
     RoleAssignment,
@@ -40,7 +40,6 @@ from coyote_mcp.schemas import (
     CollectionUpdate,
     ExternalGroupCreate,
     GroupRoleMappingCreate,
-    IdentityProviderCreate,
     MembershipCreate,
     MembershipResponse,
     Page,
@@ -58,7 +57,7 @@ from coyote_mcp.schemas import (
     ToolResponse,
 )
 from coyote_mcp.security import UnsafeEndpointError, validate_endpoint
-from coyote_mcp.settings import Settings, oidc_client_secret_reference
+from coyote_mcp.settings import Settings
 
 router = APIRouter(prefix="/api/v1")
 Session = Annotated[AsyncSession, Depends(get_session)]
@@ -86,8 +85,12 @@ async def require(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions."
         )
+    if resource is None and current.organization_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="An active organization is required."
+        )
     context: dict[str, object] | None = (
-        {"organization_id": current.principal.organization_id} if resource is None else None
+        {"organization_id": current.require_organization_id()} if resource is None else None
     )
     decision = await authorize(
         session,
@@ -96,7 +99,7 @@ async def require(
         resource,
         context,
         current.verified_group_ids,
-        current.identity_provider_id,
+        current.credential_context,
     )
     if not decision.allowed:
         raise HTTPException(
@@ -112,7 +115,7 @@ async def register_server(
     try:
         validate_endpoint(str(request.endpoint), Settings())
         return ServerResponse.model_validate(
-            await catalog.create_server(session, current.principal.organization_id, request)
+            await catalog.create_server(session, current.require_organization_id(), request)
         )
     except UnsafeEndpointError as error:
         raise HTTPException(
@@ -128,7 +131,7 @@ async def list_servers(
 ) -> list[ServerResponse]:
     await require(session, current, "server:read")
     servers = await catalog.list_servers(
-        session, current.principal.organization_id, page_params.limit, page_params.offset
+        session, current.require_organization_id(), page_params.limit, page_params.offset
     )
     return [ServerResponse.model_validate(server) for server in servers]
 
@@ -136,7 +139,7 @@ async def list_servers(
 @router.get("/servers/{server_id}", response_model=ServerResponse)
 async def server_details(server_id: UUID, session: Session, current: Current) -> ServerResponse:
     try:
-        server = await catalog.get_server(session, current.principal.organization_id, server_id)
+        server = await catalog.get_server(session, current.require_organization_id(), server_id)
     except catalog.MissingResourceError as error:
         raise resource_not_found(error) from error
     await require(session, current, "server:read", server)
@@ -146,7 +149,7 @@ async def server_details(server_id: UUID, session: Session, current: Current) ->
 @router.post("/servers/{server_id}/sync", response_model=ServerResponse)
 async def sync_server(server_id: UUID, session: Session, current: Current) -> ServerResponse:
     try:
-        server = await catalog.get_server(session, current.principal.organization_id, server_id)
+        server = await catalog.get_server(session, current.require_organization_id(), server_id)
     except catalog.MissingResourceError as error:
         raise resource_not_found(error) from error
     await require(session, current, "server:sync", server)
@@ -170,11 +173,11 @@ async def server_tools(
     server_id: UUID, page_params: PageParams, session: Session, current: Current
 ) -> list[ToolResponse]:
     try:
-        server = await catalog.get_server(session, current.principal.organization_id, server_id)
+        server = await catalog.get_server(session, current.require_organization_id(), server_id)
         await require(session, current, "tool:describe", server)
         tools = await catalog.list_server_tools(
             session,
-            current.principal.organization_id,
+            current.require_organization_id(),
             server_id,
             page_params.limit,
             page_params.offset,
@@ -191,7 +194,7 @@ async def create_collection(
     await require(session, current, "collection:create")
     try:
         return CollectionResponse.model_validate(
-            await catalog.create_collection(session, current.principal.organization_id, request)
+            await catalog.create_collection(session, current.require_organization_id(), request)
         )
     except catalog.DuplicateResourceError as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
@@ -203,11 +206,19 @@ async def list_collections(
 ) -> list[CollectionResponse]:
     await require(session, current, "collection:read")
     collections = await catalog.list_collections(
-        session, current.principal.organization_id, page_params.limit, page_params.offset
+        session, current.require_organization_id(), page_params.limit, page_params.offset
     )
     visible: list[CollectionResponse] = []
     for collection in collections:
-        if (await authorize(session, current.principal, "collection:read", collection)).allowed:
+        if (
+            await authorize(
+                session,
+                current.principal,
+                "collection:read",
+                collection,
+                credential_context=current.credential_context,
+            )
+        ).allowed:
             visible.append(CollectionResponse.model_validate(collection))
     return visible
 
@@ -218,12 +229,12 @@ async def collection_details(
 ) -> CollectionDetailResponse:
     try:
         collection = await catalog.get_collection(
-            session, current.principal.organization_id, collection_id
+            session, current.require_organization_id(), collection_id
         )
     except catalog.MissingResourceError as error:
         raise resource_not_found(error) from error
     await require(session, current, "collection:read", collection)
-    memberships = await _get_memberships(collection_id, current.principal.organization_id, session)
+    memberships = await _get_memberships(collection_id, current.require_organization_id(), session)
     return CollectionDetailResponse(
         **CollectionResponse.model_validate(collection).model_dump(), memberships=memberships
     )
@@ -267,12 +278,12 @@ async def add_collection_server(
 ) -> MembershipResponse:
     try:
         collection = await catalog.get_collection(
-            session, current.principal.organization_id, collection_id
+            session, current.require_organization_id(), collection_id
         )
         await require(session, current, "collection:manage_members", collection)
         return MembershipResponse.model_validate(
             await catalog.add_membership(
-                session, current.principal.organization_id, collection_id, request
+                session, current.require_organization_id(), collection_id, request
             )
         )
     except catalog.MissingResourceError as error:
@@ -289,11 +300,11 @@ async def delete_collection_server(
 ) -> None:
     try:
         collection = await catalog.get_collection(
-            session, current.principal.organization_id, collection_id
+            session, current.require_organization_id(), collection_id
         )
         await require(session, current, "collection:manage_members", collection)
         await catalog.remove_membership(
-            session, current.principal.organization_id, collection_id, server_id
+            session, current.require_organization_id(), collection_id, server_id
         )
     except catalog.MissingResourceError as error:
         raise resource_not_found(error) from error
@@ -305,12 +316,12 @@ async def collection_tools(
 ) -> list[ToolResponse]:
     try:
         collection = await catalog.get_collection(
-            session, current.principal.organization_id, collection_id
+            session, current.require_organization_id(), collection_id
         )
         await require(session, current, "tool:discover", collection)
         tools = await catalog.list_collection_tools(
             session,
-            current.principal.organization_id,
+            current.require_organization_id(),
             collection_id,
             page_params.limit,
             page_params.offset,
@@ -326,7 +337,7 @@ async def collection_publications(
 ) -> list[PublicationResponse]:
     try:
         collection = await catalog.get_collection(
-            session, current.principal.organization_id, collection_id
+            session, current.require_organization_id(), collection_id
         )
         await require(session, current, "collection:update", collection)
         publications = await catalog.list_publications(
@@ -347,7 +358,7 @@ async def publish_collection_tool(
 ) -> PublicationResponse:
     try:
         collection = await catalog.get_collection(
-            session, current.principal.organization_id, collection_id
+            session, current.require_organization_id(), collection_id
         )
         await require(session, current, "collection:update", collection)
         publication = await catalog.publish_tool(session, current, collection_id, request)
@@ -370,7 +381,7 @@ async def update_collection_publication(
 ) -> PublicationResponse:
     try:
         collection = await catalog.get_collection(
-            session, current.principal.organization_id, collection_id
+            session, current.require_organization_id(), collection_id
         )
         await require(session, current, "collection:update", collection)
         publication = await catalog.update_publication(
@@ -392,7 +403,7 @@ async def delete_collection_publication(
 ) -> None:
     try:
         collection = await catalog.get_collection(
-            session, current.principal.organization_id, collection_id
+            session, current.require_organization_id(), collection_id
         )
         await require(session, current, "collection:update", collection)
         await catalog.remove_publication(session, current, collection_id, publication_id)
@@ -405,7 +416,10 @@ async def list_pats(session: Session, current: Current) -> list[PATResponse]:
     await require(session, current, "credential:create")
     tokens = await session.scalars(
         select(PersonalAccessToken)
-        .where(PersonalAccessToken.principal_id == current.principal.id)
+        .where(
+            PersonalAccessToken.principal_id == current.principal.id,
+            PersonalAccessToken.organization_id == current.require_organization_id(),
+        )
         .order_by(PersonalAccessToken.created_at)
     )
     return [PATResponse.model_validate(token) for token in tokens.all()]
@@ -418,6 +432,7 @@ async def create_pat(request: PATCreate, session: Session, current: Current) -> 
         token, plaintext = await issue_pat(
             session,
             current.principal,
+            current.require_organization_id(),
             request.name,
             request.scopes,
             timedelta(seconds=request.lifetime_seconds),
@@ -437,6 +452,7 @@ async def revoke_pat(token_id: UUID, session: Session, current: Current) -> None
         select(PersonalAccessToken).where(
             PersonalAccessToken.id == token_id,
             PersonalAccessToken.principal_id == current.principal.id,
+            PersonalAccessToken.organization_id == current.require_organization_id(),
         )
     )
     if token is None:
@@ -456,8 +472,9 @@ async def list_service_principals(session: Session, current: Current) -> list[Pr
     await require_identity_administrator(session, current)
     principals = await session.scalars(
         select(Principal)
+        .join(OrganizationMembership, OrganizationMembership.principal_id == Principal.id)
         .where(
-            Principal.organization_id == current.principal.organization_id,
+            OrganizationMembership.organization_id == current.require_organization_id(),
             Principal.identity_type == "service",
         )
         .order_by(Principal.identifier)
@@ -473,13 +490,16 @@ async def create_service_principal(
 ) -> PrincipalResponse:
     await require_identity_administrator(session, current)
     actor_permissions = current.scopes & await effective_permissions(
-        session, current.principal, current.verified_group_ids, current.identity_provider_id
+        session,
+        current.principal,
+        current.require_organization_id(),
+        current.verified_group_ids,
+        current.credential_context,
     )
     requested_permissions = frozenset().union(*(ROLE_PERMISSIONS[role] for role in request.roles))
     if not requested_permissions.issubset(actor_permissions):
         raise HTTPException(status_code=403, detail="Cannot grant permissions you do not hold.")
     principal = Principal(
-        organization_id=current.principal.organization_id,
         identifier=request.identifier,
         display_name=request.display_name,
         identity_type="service",
@@ -487,10 +507,17 @@ async def create_service_principal(
     session.add(principal)
     try:
         await session.flush()
+        session.add(
+            OrganizationMembership(
+                organization_id=current.require_organization_id(), principal_id=principal.id
+            )
+        )
         session.add_all(
             [
                 RoleAssignment(
-                    organization_id=principal.organization_id, principal_id=principal.id, role=role
+                    organization_id=current.require_organization_id(),
+                    principal_id=principal.id,
+                    role=role,
                 )
                 for role in request.roles
             ]
@@ -509,11 +536,19 @@ async def service_principal_or_404(
     principal = await session.scalar(
         select(Principal).where(
             Principal.id == principal_id,
-            Principal.organization_id == organization_id,
             Principal.identity_type == "service",
         )
     )
     if principal is None:
+        raise HTTPException(status_code=404, detail="Resource not found.")
+    membership = await session.scalar(
+        select(OrganizationMembership).where(
+            OrganizationMembership.principal_id == principal.id,
+            OrganizationMembership.organization_id == organization_id,
+            OrganizationMembership.enabled.is_(True),
+        )
+    )
+    if membership is None:
         raise HTTPException(status_code=404, detail="Resource not found.")
     return principal
 
@@ -522,7 +557,7 @@ async def service_principal_or_404(
 async def disable_service_principal(principal_id: UUID, session: Session, current: Current) -> None:
     await require_identity_administrator(session, current)
     principal = await service_principal_or_404(
-        session, current.principal.organization_id, principal_id
+        session, current.require_organization_id(), principal_id
     )
     principal.enabled = False
     await session.commit()
@@ -538,10 +573,14 @@ async def issue_service_pat(
 ) -> PATCreatedResponse:
     await require_identity_administrator(session, current)
     principal = await service_principal_or_404(
-        session, current.principal.organization_id, principal_id
+        session, current.require_organization_id(), principal_id
     )
     actor_permissions = current.scopes & await effective_permissions(
-        session, current.principal, current.verified_group_ids, current.identity_provider_id
+        session,
+        current.principal,
+        current.require_organization_id(),
+        current.verified_group_ids,
+        current.credential_context,
     )
     if not request.scopes.issubset(actor_permissions):
         raise HTTPException(status_code=403, detail="Cannot issue broader credentials.")
@@ -549,6 +588,7 @@ async def issue_service_pat(
         token, plaintext = await issue_pat(
             session,
             principal,
+            current.require_organization_id(),
             request.name,
             request.scopes,
             timedelta(seconds=request.lifetime_seconds),
@@ -566,12 +606,12 @@ async def revoke_service_pat(
     principal_id: UUID, token_id: UUID, session: Session, current: Current
 ) -> None:
     await require_identity_administrator(session, current)
-    await service_principal_or_404(session, current.principal.organization_id, principal_id)
+    await service_principal_or_404(session, current.require_organization_id(), principal_id)
     token = await session.scalar(
         select(PersonalAccessToken).where(
             PersonalAccessToken.id == token_id,
             PersonalAccessToken.principal_id == principal_id,
-            PersonalAccessToken.organization_id == current.principal.organization_id,
+            PersonalAccessToken.organization_id == current.require_organization_id(),
         )
     )
     if token is None:
@@ -580,58 +620,13 @@ async def revoke_service_pat(
     await session.commit()
 
 
-@router.post("/identity-providers", status_code=status.HTTP_201_CREATED)
-async def create_identity_provider(
-    request: IdentityProviderCreate, session: Session, current: Current
-) -> dict[str, str]:
-    await require_identity_administrator(session, current)
-    if request.client_secret_reference != "env:auto":
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="OIDC client secrets must use the operator-managed env:auto binding.",
-        )
-    provider_id = uuid4()
-    provider = IdentityProvider(
-        id=provider_id,
-        organization_id=current.principal.organization_id,
-        name=request.name,
-        issuer=str(request.issuer),
-        client_id=request.client_id,
-        client_secret_reference=oidc_client_secret_reference(
-            current.principal.organization_id, provider_id
-        ),
-        allowed_organization=request.allowed_organization,
-        group_claim=request.group_claim,
-        trusted_endpoint_hosts=request.trusted_endpoint_hosts,
-        jit_provisioning_enabled=request.jit_provisioning_enabled,
-    )
-    session.add(provider)
-    try:
-        await session.commit()
-    except IntegrityError as error:
-        await session.rollback()
-        raise HTTPException(
-            status_code=409, detail="Identity provider conflicts with existing configuration."
-        ) from error
-    return {"id": str(provider.id)}
-
-
 @router.post("/external-groups", status_code=status.HTTP_201_CREATED)
 async def create_external_group(
     request: ExternalGroupCreate, session: Session, current: Current
 ) -> dict[str, str]:
     await require_identity_administrator(session, current)
-    provider = await session.scalar(
-        select(IdentityProvider).where(
-            IdentityProvider.id == request.identity_provider_id,
-            IdentityProvider.organization_id == current.principal.organization_id,
-        )
-    )
-    if provider is None:
-        raise HTTPException(status_code=404, detail="Resource not found.")
     group = ExternalGroup(
-        organization_id=current.principal.organization_id,
-        identity_provider_id=request.identity_provider_id,
+        organization_id=current.require_organization_id(),
         external_id=request.external_id,
         display_name=request.display_name,
     )
@@ -652,17 +647,17 @@ async def create_group_role_mapping(
     group = await session.scalar(
         select(ExternalGroup).where(
             ExternalGroup.id == group_id,
-            ExternalGroup.organization_id == current.principal.organization_id,
+            ExternalGroup.organization_id == current.require_organization_id(),
         )
     )
     if group is None:
         raise HTTPException(status_code=404, detail="Resource not found.")
     if request.collection_id is not None:
         collection = await session.get(Collection, request.collection_id)
-        if collection is None or collection.organization_id != current.principal.organization_id:
+        if collection is None or collection.organization_id != current.require_organization_id():
             raise HTTPException(status_code=404, detail="Resource not found.")
     mapping = GroupRoleMapping(
-        organization_id=current.principal.organization_id,
+        organization_id=current.require_organization_id(),
         external_group_id=group.id,
         role=request.role,
         collection_id=request.collection_id,

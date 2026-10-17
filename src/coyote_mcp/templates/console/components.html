@@ -1,0 +1,15 @@
+{% macro navigation_item(label, name, href, active_navigation) -%}
+<a class="navigation-item {% if active_navigation == name %}is-active{% endif %}" href="{{ href }}" {% if active_navigation == name %}aria-current="page"{% endif %}>{{ label }}</a>
+{%- endmacro %}
+
+{% macro status_badge(status) -%}
+<span class="badge badge-{{ status|lower|replace('_', '-') }}">{{ status|replace('_', ' ') }}</span>
+{%- endmacro %}
+
+{% macro empty_state(title, message) -%}
+<section class="empty-state" aria-label="{{ title }}"><h2>{{ title }}</h2><p>{{ message }}</p></section>
+{%- endmacro %}
+
+{% macro page_header(title, description='') -%}
+<header class="page-header"><div><h1>{{ title }}</h1>{% if description %}<p>{{ description }}</p>{% endif %}</div><div class="page-actions"></div></header>
+{%- endmacro %}

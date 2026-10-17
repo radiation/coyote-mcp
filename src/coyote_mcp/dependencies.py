@@ -48,6 +48,11 @@ async def current_principal(
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN, detail="CSRF validation failed."
             )
+        if request.url.path.startswith("/api/") and browser_session.organization_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="An active organization is required.",
+            )
         return browser_session
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
 
