@@ -1,0 +1,29 @@
+{% import "console/components.html" as components %}
+{{ components.page_header('Edit publication', 'Tool ' ~ tool.name ~ ' in ' ~ collection.display_name) }}
+{% if form_error %}<div class="form-error" role="alert">{{ form_error }}</div>{% endif %}
+<section class="section-block">
+  <form method="post" action="{{ url_for('publication_update', collection_id=collection.id, publication_id=publication.id) }}" hx-boost="false" class="form-stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field">
+      <label for="published_name">Published name</label>
+      <input id="published_name" name="published_name" type="text" maxlength="200" required pattern="[A-Za-z0-9][A-Za-z0-9_\-]*" value="{{ values.get('published_name', '') }}" aria-describedby="published-name-help">
+      <small id="published-name-help">Stable alias clients use for this tool. Letters, digits, hyphens, and underscores; unique within this collection.</small>
+    </div>
+    <div class="field">
+      <label for="description_override">Description override</label>
+      <textarea id="description_override" name="description_override" maxlength="4096" rows="4" aria-describedby="description-help">{{ values.get('description_override', '') }}</textarea>
+      <small id="description-help">Leave blank to use the description discovered from the downstream server.</small>
+    </div>
+    <div class="field">
+      <label for="enabled">Publication state</label>
+      <select id="enabled" name="enabled">
+        <option value="true" {% if values.get('enabled') == 'true' %}selected{% endif %}>Enabled</option>
+        <option value="false" {% if values.get('enabled') == 'false' %}selected{% endif %}>Disabled</option>
+      </select>
+    </div>
+    <div class="action-row">
+      <button type="submit">Save publication</button>
+      <a class="button button-secondary" href="{{ url_for('collection_publications', collection_id=collection.id) }}">Cancel</a>
+    </div>
+  </form>
+</section>

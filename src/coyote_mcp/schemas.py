@@ -22,6 +22,11 @@ class ServerCreate(BaseModel):
     transport: Literal["streamable_http"] = "streamable_http"
 
 
+class ServerUpdate(BaseModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=160)
+    endpoint: HttpUrl | None = None
+
+
 class ServerResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -30,6 +35,7 @@ class ServerResponse(BaseModel):
     display_name: str
     endpoint: str
     transport: str
+    enabled: bool
     status: str
     last_synced_at: datetime | None
     last_sync_error: str | None
@@ -60,7 +66,17 @@ class CollectionCreate(BaseModel):
 
 
 class CollectionUpdate(BaseModel):
-    exposure_mode: Literal["discovery", "native"]
+    display_name: str | None = Field(default=None, min_length=1, max_length=160)
+    description: str | None = Field(default=None, max_length=1000)
+    enabled: bool | None = None
+    exposure_mode: Literal["discovery", "native"] | None = None
+
+    @model_validator(mode="after")
+    def required_fields_cannot_be_null(self) -> CollectionUpdate:
+        for field in ("display_name", "description", "enabled", "exposure_mode"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f"{field} cannot be null")
+        return self
 
 
 class MembershipCreate(BaseModel):

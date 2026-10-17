@@ -22,10 +22,10 @@ from coyote_mcp.auth import (
     ExternalIdentityResolutionError,
     _hash_secret,
     authenticate_browser_session,
+    csrf_token_for,
     csrf_token_valid,
     issue_browser_session,
     resolve_external_identity,
-    rotate_csrf_token,
 )
 from coyote_mcp.db import get_session
 from coyote_mcp.discovery import PinnedDestinationTransport
@@ -441,10 +441,9 @@ async def callback(request: Request, code: str, state: str, session: Session) ->
     if existing_session is not None and existing_session.browser_session is not None:
         existing_session.browser_session.revoked_at = datetime.now(UTC)
         await session.commit()
-    browser_session, session_token = await issue_browser_session(
+    _, session_token = await issue_browser_session(
         session, principal, [] if incomplete else groups_value, Settings()
     )
-    await rotate_csrf_token(session, browser_session)
     response = RedirectResponse("/console", status_code=status.HTTP_303_SEE_OTHER)
     _set_browser_session_cookie(response, session_token)
     _delete_oidc_binding_cookie(response, state)
@@ -460,7 +459,10 @@ async def logout(request: Request, session: Session) -> Response:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required."
         )
-    if not csrf_token_valid(authenticated.browser_session, request.headers.get("x-csrf-token")):
+    settings = Settings()
+    if not csrf_token_valid(
+        authenticated.browser_session, request.headers.get("x-csrf-token"), settings
+    ):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="CSRF validation failed.")
     authenticated.browser_session.revoked_at = datetime.now(UTC)
     await session.commit()
@@ -478,5 +480,5 @@ async def csrf_token(request: Request, session: Session) -> JSONResponse:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required."
         )
-    token = await rotate_csrf_token(session, authenticated.browser_session)
+    token = csrf_token_for(authenticated.browser_session, Settings())
     return JSONResponse({"csrf_token": token})

@@ -1,0 +1,49 @@
+{% import "console/components.html" as components %}
+{% if server %}
+{{ components.page_header('Edit ' ~ server.display_name, 'Server name is immutable. The endpoint is hidden; leave it blank to keep the current one.') }}
+{% else %}
+{{ components.page_header('Register server', 'Register a downstream MCP server. The endpoint must be a public HTTPS URL.') }}
+{% endif %}
+{% if form_error %}<div class="form-error" role="alert">{{ form_error }}</div>{% endif %}
+<section class="section-block">
+  {% if server %}
+  <form method="post" action="{{ url_for('server_update', server_id=server.id) }}" hx-boost="false" class="form-stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field"><span class="field-label">Name</span><code>{{ server.name }}</code></div>
+    <div class="field">
+      <label for="display_name">Display name</label>
+      <input id="display_name" name="display_name" type="text" maxlength="160" required value="{{ values.get('display_name', '') }}">
+    </div>
+    <div class="field">
+      <label for="endpoint">New endpoint URL <small>(current: <code>{{ server.endpoint|redacted_endpoint }}</code>)</small></label>
+      <input id="endpoint" name="endpoint" type="url" maxlength="2048" placeholder="Leave blank to keep the current endpoint" autocomplete="off">
+    </div>
+    <p class="muted">Changing the endpoint marks the server pending and clears its last discovery result until it is refreshed.</p>
+    <div class="action-row">
+      <button type="submit">Save server</button>
+      <a class="button button-secondary" href="{{ url_for('server_detail', server_id=server.id) }}">Cancel</a>
+    </div>
+  </form>
+  {% else %}
+  <form method="post" action="{{ url_for('server_register') }}" hx-boost="false" class="form-stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field">
+      <label for="name">Name</label>
+      <input id="name" name="name" type="text" maxlength="160" required pattern="[a-z0-9][a-z0-9\-]*" value="{{ values.get('name', '') }}" aria-describedby="name-help">
+      <small id="name-help">Lowercase letters, digits, and hyphens. Must be unique in this organization.</small>
+    </div>
+    <div class="field">
+      <label for="display_name">Display name</label>
+      <input id="display_name" name="display_name" type="text" maxlength="160" required value="{{ values.get('display_name', '') }}">
+    </div>
+    <div class="field">
+      <label for="endpoint">Endpoint URL</label>
+      <input id="endpoint" name="endpoint" type="url" maxlength="2048" required placeholder="https://mcp.example.com/mcp" autocomplete="off">
+    </div>
+    <div class="action-row">
+      <button type="submit">Register server</button>
+      <a class="button button-secondary" href="{{ url_for('server_list') }}">Cancel</a>
+    </div>
+  </form>
+  {% endif %}
+</section>

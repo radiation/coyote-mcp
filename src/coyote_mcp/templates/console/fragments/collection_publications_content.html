@@ -1,0 +1,62 @@
+{% import "console/components.html" as components %}
+{{ components.page_header('Publications: ' ~ collection.display_name, 'Publish discovered tools to expose them through this collection. Discovery never publishes a tool.') }}
+<p class="muted"><a href="{{ url_for('collection_detail', collection_id=collection.id) }}">Back to collection</a></p>
+{% if not collection.enabled %}<div class="form-warning" role="status">This collection is disabled. Publications are kept, but no tools are exposed through its endpoint until it is enabled.</div>{% endif %}
+{% if action_error %}<div class="form-error" role="alert">{{ action_error }}</div>{% endif %}
+<section class="section-block" aria-labelledby="published-title">
+  <div class="section-heading"><h2 id="published-title">Published tools</h2></div>
+  {% if published_rows %}
+  <div class="table-wrap"><table><thead><tr>
+    <th scope="col">Published name</th>
+    <th scope="col">Tool</th>
+    <th scope="col">Server</th>
+    <th scope="col">Publication</th>
+    <th scope="col">Exposure</th>
+    <th scope="col"><span class="visually-hidden">Actions</span></th>
+  </tr></thead><tbody>
+    {% for publication, tool, server, issues in published_rows %}<tr>
+      <td><code>{{ publication.published_name }}</code></td>
+      <td><code>{{ tool.name }}</code></td>
+      <td>{{ server.display_name }}</td>
+      <td>{% if publication.enabled %}Enabled{% else %}Disabled{% endif %}</td>
+      <td>{% if issues %}<ul class="issue-list">{% for issue in issues %}<li>{{ issue }}</li>{% endfor %}</ul>{% else %}<span class="badge badge-ready">Exposed</span>{% endif %}</td>
+      <td class="row-actions">
+        <a class="button button-secondary" href="{{ url_for('publication_edit_form', collection_id=collection.id, publication_id=publication.id) }}">Edit<span class="visually-hidden"> {{ publication.published_name }}</span></a>
+        <form method="post" action="{{ url_for('publication_remove', collection_id=collection.id, publication_id=publication.id) }}" hx-boost="false" class="inline-form" onsubmit="return confirm('Unpublish this tool? Clients will no longer see or execute it through this collection.');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="button-danger">Unpublish<span class="visually-hidden"> {{ publication.published_name }}</span></button>
+        </form>
+      </td>
+    </tr>{% endfor %}
+  </tbody></table></div>
+  {{ components.pagination(request, published_page, published_has_next, 'published_page') }}
+  {% else %}{{ components.empty_state('No published tools', 'Publish a tool from the list below to expose it through this collection.') }}{% endif %}
+</section>
+<section class="section-block" aria-labelledby="unpublished-title">
+  <div class="section-heading"><h2 id="unpublished-title">Unpublished tools</h2></div>
+  <p class="muted">Tools from enabled member servers that are not published in this collection. Publishing is required before clients can use them.</p>
+  {% if unpublished_rows %}
+  <div class="table-wrap"><table><thead><tr>
+    <th scope="col">Tool</th>
+    <th scope="col">Server</th>
+    <th scope="col">Description</th>
+    <th scope="col">Publish</th>
+  </tr></thead><tbody>
+    {% for tool, server, suggested_name in unpublished_rows %}<tr>
+      <td><code>{{ tool.name }}</code> <span class="badge badge-unpublished">Unpublished</span></td>
+      <td>{{ server.display_name }}</td>
+      <td class="wrap-text">{{ tool.description or '' }}</td>
+      <td>
+        <form method="post" action="{{ url_for('publication_create', collection_id=collection.id) }}" hx-boost="false" class="inline-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="tool_id" value="{{ tool.id }}">
+          <label for="published-name-{{ tool.id }}" class="visually-hidden">Published name for {{ tool.name }}</label>
+          <input id="published-name-{{ tool.id }}" name="published_name" type="text" maxlength="200" required pattern="[A-Za-z0-9][A-Za-z0-9_\-]*" value="{{ suggested_name }}">
+          <button type="submit">Publish</button>
+        </form>
+      </td>
+    </tr>{% endfor %}
+  </tbody></table></div>
+  {{ components.pagination(request, page, has_next) }}
+  {% else %}{{ components.empty_state('No unpublished tools', 'Every available tool is published, or no member server has active discovered tools.') }}{% endif %}
+</section>

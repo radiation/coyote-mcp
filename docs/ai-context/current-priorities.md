@@ -74,6 +74,43 @@
   select any department and create new ones; creation atomically grants the new
   department's owner membership and role. PATs remain single-department and MCP
   discovery/execution remains membership- and publication-gated.
+- **Phase 4B server registry:** The console lists, registers, views, edits
+  display name and endpoint, enables/disables, refreshes discovery for, and
+  removes downstream servers for the active organization. Registration and
+  edits reuse the existing endpoint validation and SSRF defenses. Migration
+  `0017` adds `servers.enabled`; disabled servers are excluded from gateway
+  discovery and execution. Servers are removed only when no collection
+  membership or tool publication references them. Secrets and raw connection
+  configuration are never rendered; endpoints show only scheme, host, and path.
+- **Phase 4B collections:** The console lists, creates, edits, enables/disables,
+  and manages membership for organization collections, and shows each
+  collection's available and published tools. Membership is managed with the
+  existing `collection:manage_members` action. Removing a server from a
+  collection also removes its publications in that collection. The page shows
+  the endpoint as `/mcp/collections/{slug}` derived from the request origin, so
+  it must be checked behind a reverse proxy. Collection pages authorize each
+  collection individually, so collection-scoped roles work without an
+  organization-wide grant; the collection list shows only collections the
+  viewer may read. Pagination filters each page after fetching it, so a
+  restricted user can see a short page even when more collections exist.
+- **Phase 4B tool publication:** The Tool Catalog page lists bounded, paginated
+  discovered tools. Publication state is shown only to principals with
+  organization-wide `collection:update`. Each collection has a publications page
+  that publishes an available tool with a stable alias, edits the alias,
+  description override, and enabled state, and unpublishes a tool. Discovery
+  never publishes a tool. Duplicate tools and aliases return 409, and
+  publications for foreign or nonexistent tools return 422 without revealing
+  which. Published-tool visibility requires `collection:update`. Publishing
+  into a disabled collection is allowed, and the page warns that nothing is
+  exposed until the collection is enabled.
+- **Console CSRF lifecycle:** Console and API mutations use a token derived with
+  HMAC-SHA256 from the browser session's stored secret hash, a `csrf_epoch`
+  counter (migration `0018`), and the session secret key. Rendering reuses the
+  token, so several open forms can each be submitted. Only lifecycle boundaries
+  rotate it: an organization switch (including automatic selection) or first-organization
+  creation increments the epoch in the same transaction as the active organization change,
+  so an old form cannot pair the new organization with the previous token. New sessions
+  receive new tokens. Missing, invalid, and cross-session tokens are rejected.
 
 ## Next
 
@@ -81,8 +118,9 @@
   and operational metrics for MCP execution.
 - **Phase 3C:** Per-principal fine-grained tool policy, richer discovery, and
   semantic search without weakening the persisted-catalog boundary.
-- **Later:** Console CRUD workflows and semantic/search-based progressive
-  discovery while preserving the database registry and policy model.
+- **Later:** Semantic/search-based progressive discovery, console audit views,
+  and remaining administration workflows (principal and token management)
+  while preserving the database registry and policy model.
 
 ## Open technical decisions
 

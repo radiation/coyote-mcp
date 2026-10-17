@@ -1,0 +1,85 @@
+{% import "console/components.html" as components %}
+{{ components.page_header(collection.display_name, 'Collection ' ~ collection.slug) }}
+{% if action_error %}<div class="form-error" role="alert">{{ action_error }}</div>{% endif %}
+<section class="section-block" aria-labelledby="collection-details-title">
+  <div class="section-heading"><h2 id="collection-details-title">Details</h2></div>
+  <dl class="detail-list">
+    <dt>Slug</dt><dd><code>{{ collection.slug }}</code></dd>
+    <dt>State</dt><dd>{% if collection.enabled %}Enabled{% else %}Disabled — no tools are exposed through this endpoint{% endif %}</dd>
+    <dt>Exposure mode</dt><dd>{{ collection.exposure_mode }}</dd>
+    <dt>Description</dt><dd>{{ collection.description or 'No description' }}</dd>
+    <dt>MCP endpoint</dt><dd><code>{{ endpoint_url }}</code><small>Configure MCP clients with this URL and a PAT for this organization.</small></dd>
+  </dl>
+  <div class="action-row">
+    {% if can_update %}
+    <a class="button button-secondary" href="{{ url_for('collection_edit_form', collection_id=collection.id) }}">Edit collection</a>
+    <form method="post" action="{{ url_for('collection_set_enabled', collection_id=collection.id) }}" hx-boost="false" class="inline-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="enabled" value="{{ 'false' if collection.enabled else 'true' }}">
+      <button type="submit" class="button-secondary">{{ 'Disable collection' if collection.enabled else 'Enable collection' }}</button>
+    </form>
+    {% endif %}
+  </div>
+</section>
+<section class="section-block" aria-labelledby="collection-members-title">
+  <div class="section-heading"><h2 id="collection-members-title">Member servers</h2></div>
+  {% if memberships %}
+  <p class="muted">Removing a server also unpublishes its tools from this collection.</p>
+  <div class="table-wrap"><table><thead><tr><th scope="col">Server</th><th scope="col">Status</th><th scope="col">Enabled</th>{% if can_manage_members %}<th scope="col"><span class="visually-hidden">Actions</span></th>{% endif %}</tr></thead><tbody>
+    {% for membership, server in memberships %}<tr>
+      <td><strong>{{ server.display_name }}</strong><small>{{ server.name }}</small></td>
+      <td>{{ components.status_badge(server.status) }}</td>
+      <td>{% if server.enabled %}Enabled{% else %}Server disabled{% endif %}</td>
+      {% if can_manage_members %}<td>
+        <form method="post" action="{{ url_for('collection_remove_server', collection_id=collection.id, server_id=server.id) }}" hx-boost="false" class="inline-form" onsubmit="return confirm('Remove this server? Its tools will be unpublished from this collection.');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="button-danger">Remove</button>
+        </form>
+      </td>{% endif %}
+    </tr>{% endfor %}
+  </tbody></table></div>
+  {% if membership_truncated %}<p class="muted">Showing the first {{ memberships|length }} member servers.</p>{% endif %}
+  {% else %}{{ components.empty_state('No member servers', 'Add a registered server to make its tools available to this collection.') }}{% endif %}
+  {% if can_manage_members and addable_servers %}
+  <form method="post" action="{{ url_for('collection_add_server', collection_id=collection.id) }}" hx-boost="false" class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="server_id">Add server</label>
+    <select id="server_id" name="server_id" required>
+      {% for server in addable_servers %}<option value="{{ server.id }}">{{ server.display_name }} ({{ server.name }})</option>{% endfor %}
+    </select>
+    <button type="submit">Add server</button>
+  </form>
+  {% endif %}
+</section>
+<section class="section-block" aria-labelledby="collection-available-title">
+  <div class="section-heading"><h2 id="collection-available-title">Available tools</h2></div>
+  <p class="muted">Tools from member servers. Publishing an available tool is required before clients can use it.</p>
+  {% if available_tools %}
+  <div class="table-wrap"><table><thead><tr><th scope="col">Tool</th><th scope="col">Server</th><th scope="col">Description</th></tr></thead><tbody>
+    {% for tool, server in available_tools %}<tr>
+      <td><code>{{ tool.name }}</code></td>
+      <td>{{ server.display_name }}</td>
+      <td class="wrap-text">{{ tool.description }}</td>
+    </tr>{% endfor %}
+  </tbody></table></div>
+  {{ components.pagination(request, page, has_next) }}
+  {% else %}{{ components.empty_state('No available tools', collection.enabled and 'Add member servers with active discovered tools to see them here.' or 'This collection is disabled, so no tools are listed.') }}{% endif %}
+</section>
+{% if can_update %}
+<section class="section-block" aria-labelledby="collection-published-title">
+  <div class="section-heading"><h2 id="collection-published-title">Published tools</h2></div>
+  <p class="muted">Tools exposed to MCP clients through this collection.</p>
+  <div class="action-row"><a class="button button-secondary" href="{{ url_for('collection_publications', collection_id=collection.id) }}">Manage publications</a></div>
+  {% if published_tools %}
+  <div class="table-wrap"><table><thead><tr><th scope="col">Published name</th><th scope="col">Tool</th><th scope="col">Server</th><th scope="col">Enabled</th></tr></thead><tbody>
+    {% for publication, tool, server, _membership_enabled in published_tools %}<tr>
+      <td><code>{{ publication.published_name }}</code></td>
+      <td><code>{{ tool.name }}</code></td>
+      <td>{{ server.display_name }}</td>
+      <td>{% if publication.enabled %}Enabled{% else %}Disabled{% endif %}</td>
+    </tr>{% endfor %}
+  </tbody></table></div>
+  {{ components.pagination(request, published_page, published_has_next, 'published_page') }}
+  {% else %}{{ components.empty_state('No published tools', 'Publish available tools to expose them through this collection.') }}{% endif %}
+</section>
+{% endif %}

@@ -147,7 +147,7 @@ metadata and JWKS are retrieved from the configured issuer; the application
 validates the signature, issuer, audience, expiry, subject, and nonce before
 establishing a session. Missing or invalid OIDC settings fail closed. Browser
 session cookies are opaque, HTTP-only, `SameSite=Lax`, and server-side; session
-mutations, including logout, require the stored `X-CSRF-Token`. Bearer
+mutations, including logout, require the `X-CSRF-Token` returned by `GET /auth/oidc/csrf`. Bearer
 authentication takes precedence whenever an `Authorization` header is present:
 an invalid bearer token returns `401` and never falls back to a browser session.
 Browser sessions are not accepted by MCP; the protocol endpoint requires a PAT.

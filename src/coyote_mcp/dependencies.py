@@ -43,7 +43,9 @@ async def current_principal(
         if (
             request.url.path.startswith("/api/")
             and request.method in {"POST", "PUT", "PATCH", "DELETE"}
-            and not csrf_token_valid(persisted_session, request.headers.get("x-csrf-token"))
+            and not csrf_token_valid(
+                persisted_session, request.headers.get("x-csrf-token"), Settings()
+            )
         ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN, detail="CSRF validation failed."

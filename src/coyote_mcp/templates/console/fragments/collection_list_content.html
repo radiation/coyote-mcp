@@ -1,0 +1,15 @@
+{% import "console/components.html" as components %}
+{{ components.page_header('Collections', 'MCP collections for ' ~ organization_name) }}
+{% if can_create %}<p class="action-row"><a class="button" href="{{ url_for('collection_creation_form') }}">Create collection</a></p>{% endif %}
+<section class="section-block" aria-label="Collections">
+  {% if collections %}
+  <div class="table-wrap"><table><thead><tr><th scope="col">Collection</th><th scope="col">Exposure</th><th scope="col">State</th></tr></thead><tbody>
+    {% for collection in collections %}<tr>
+      <td><a href="{{ url_for('collection_detail', collection_id=collection.id) }}"><strong>{{ collection.display_name }}</strong></a><small><code>{{ collection.slug }}</code></small></td>
+      <td>{{ collection.exposure_mode }}</td>
+      <td>{% if collection.enabled %}Enabled{% else %}Disabled{% endif %}</td>
+    </tr>{% endfor %}
+  </tbody></table></div>
+  {{ components.pagination(request, page, has_next) }}
+  {% else %}{{ components.empty_state('No collections', 'Create a collection to group the tools that clients can reach.') }}{% endif %}
+</section>

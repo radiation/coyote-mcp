@@ -1,0 +1,16 @@
+{% import "console/components.html" as components %}
+{{ components.page_header('MCP Servers', 'Downstream MCP servers registered for ' ~ organization_name) }}
+{% if can_create %}<p class="action-row"><a class="button" href="{{ url_for('server_registration_form') }}">Register server</a></p>{% endif %}
+<section class="section-block" aria-label="Registered servers">
+  {% if servers %}
+  <div class="table-wrap"><table><thead><tr><th scope="col">Server</th><th scope="col">Status</th><th scope="col">Enabled</th><th scope="col">Last synchronized</th></tr></thead><tbody>
+    {% for server in servers %}<tr>
+      <td><a href="{{ url_for('server_detail', server_id=server.id) }}"><strong>{{ server.display_name }}</strong></a><small>{{ server.name }}</small></td>
+      <td>{{ components.status_badge(server.status) }}{% if server.last_sync_error %}<small class="error-text">{{ server.last_sync_error }}</small>{% endif %}</td>
+      <td>{% if server.enabled %}Enabled{% else %}Disabled{% endif %}</td>
+      <td>{% if server.last_synced_at %}{{ server.last_synced_at.strftime('%Y-%m-%d %H:%M UTC') }}{% else %}Not synchronized{% endif %}</td>
+    </tr>{% endfor %}
+  </tbody></table></div>
+  {{ components.pagination(request, page, has_next) }}
+  {% else %}{{ components.empty_state('No registered servers', 'Register an MCP server to begin building the catalog.') }}{% endif %}
+</section>

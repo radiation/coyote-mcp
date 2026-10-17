@@ -1,12 +1,19 @@
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import HttpUrl
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from coyote_mcp import catalog
 from coyote_mcp.auth import AuthenticatedPrincipal
-from coyote_mcp.discovery import DiscoveredTool, DiscoveryService, SyncFailedError, reconcile_tools
+from coyote_mcp.discovery import (
+    DiscoveredTool,
+    DiscoveryService,
+    SyncFailedError,
+    SyncSupersededError,
+    reconcile_tools,
+)
 from coyote_mcp.models import Organization, OrganizationMembership, Principal, RoleAssignment, Tool
 from coyote_mcp.schemas import (
     CollectionCreate,
@@ -15,6 +22,7 @@ from coyote_mcp.schemas import (
     PublicationCreate,
     PublicationUpdate,
     ServerCreate,
+    ServerUpdate,
 )
 from coyote_mcp.settings import Settings
 
@@ -222,6 +230,100 @@ async def test_failed_sync_preserves_catalog(session, organization: Organization
         await DiscoveryService(FailingDiscoveryClient(), Settings()).sync(session, server)
     tools = await catalog.list_server_tools(session, organization.id, server.id, 50, 0)
     assert [tool.name for tool in tools] == ["preserved"]
+
+
+class FixedDiscoveryClient:
+    def __init__(self, tools: list[DiscoveredTool]) -> None:
+        self._tools = tools
+        self.endpoints: list[str] = []
+
+    async def list_tools(self, endpoint: str) -> list[DiscoveredTool]:
+        self.endpoints.append(endpoint)
+        return self._tools
+
+
+class EndpointChangingDiscoveryClient:
+    """Changes the server endpoint while discovery against the previous endpoint is in flight."""
+
+    def __init__(self, session: AsyncSession, current: AuthenticatedPrincipal, server_id: UUID):
+        self._session = session
+        self._current = current
+        self._server_id = server_id
+
+    async def list_tools(self, endpoint: str) -> list[DiscoveredTool]:
+        await catalog.update_server(
+            self._session,
+            self._current,
+            self._server_id,
+            ServerUpdate(endpoint=HttpUrl("https://example.org/mcp")),
+        )
+        return [discovered_tool("stale")]
+
+
+@pytest.mark.asyncio
+async def test_endpoint_change_rejects_in_flight_discovery(
+    session, organization: Organization
+) -> None:
+    organization_id = organization.id
+    principal = Principal(identifier="owner", display_name="Owner")
+    session.add(principal)
+    await session.flush()
+    session.add(OrganizationMembership(organization_id=organization_id, principal_id=principal.id))
+    session.add(
+        RoleAssignment(organization_id=organization_id, principal_id=principal.id, role="owner")
+    )
+    server = await catalog.create_server(session, organization_id, server_request())
+    server_id = server.id
+    current = AuthenticatedPrincipal(
+        principal, frozenset({"server:update", "server:sync"}), None, organization_id
+    )
+
+    client = EndpointChangingDiscoveryClient(session, current, server_id)
+    with pytest.raises(SyncSupersededError):
+        await DiscoveryService(client, Settings()).sync(session, server)
+
+    stale_view = await catalog.get_server(session, organization_id, server_id)
+    assert stale_view.endpoint == "https://example.org/mcp"
+    assert stale_view.status == "pending"
+    assert await catalog.list_server_tools(session, organization_id, server_id, 50, 0) == []
+
+    current_client = FixedDiscoveryClient([discovered_tool("current")])
+    synced = await DiscoveryService(current_client, Settings()).sync(session, stale_view)
+    assert current_client.endpoints == ["https://example.org/mcp"]
+    assert synced.status == "ready"
+    tools = await catalog.list_server_tools(session, organization_id, server_id, 50, 0)
+    assert [tool.name for tool in tools] == ["current"]
+
+
+@pytest.mark.asyncio
+async def test_delete_server_refuses_in_use_server_and_deletes_unreferenced_server(
+    session, organization: Organization
+) -> None:
+    principal = Principal(identifier="owner", display_name="Owner")
+    session.add(principal)
+    await session.flush()
+    session.add(OrganizationMembership(organization_id=organization.id, principal_id=principal.id))
+    session.add(
+        RoleAssignment(organization_id=organization.id, principal_id=principal.id, role="owner")
+    )
+    await session.commit()
+    current = AuthenticatedPrincipal(principal, frozenset({"server:update"}), None, organization.id)
+    in_use = await catalog.create_server(session, organization.id, server_request("in-use"))
+    collection = await catalog.create_collection(
+        session, organization.id, CollectionCreate(slug="engineering", display_name="Engineering")
+    )
+    await catalog.add_membership(
+        session, organization.id, collection.id, MembershipCreate(server_id=in_use.id)
+    )
+
+    with pytest.raises(catalog.ServerInUseError):
+        await catalog.delete_server(session, current, in_use.id)
+    assert (await catalog.get_server(session, organization.id, in_use.id)).id == in_use.id
+
+    unused = await catalog.create_server(session, organization.id, server_request("unused"))
+    await catalog.delete_server(session, current, unused.id)
+    with pytest.raises(catalog.MissingResourceError):
+        await catalog.get_server(session, organization.id, unused.id)
 
 
 @pytest.mark.asyncio

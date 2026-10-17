@@ -1,0 +1,62 @@
+{% import "console/components.html" as components %}
+{% if collection %}
+{{ components.page_header('Edit ' ~ collection.display_name, 'The slug is immutable because it is part of the client endpoint URL.') }}
+{% else %}
+{{ components.page_header('Create collection', 'A collection groups the downstream tools that clients can reach through one MCP endpoint.') }}
+{% endif %}
+{% if form_error %}<div class="form-error" role="alert">{{ form_error }}</div>{% endif %}
+<section class="section-block">
+  {% if collection %}
+  <form method="post" action="{{ url_for('collection_update', collection_id=collection.id) }}" hx-boost="false" class="form-stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field"><span class="field-label">Slug</span><code>{{ collection.slug }}</code></div>
+    <div class="field">
+      <label for="display_name">Display name</label>
+      <input id="display_name" name="display_name" type="text" maxlength="160" required value="{{ values.get('display_name', '') }}">
+    </div>
+    <div class="field">
+      <label for="description">Description</label>
+      <textarea id="description" name="description" maxlength="1000" rows="3">{{ values.get('description', '') }}</textarea>
+    </div>
+    <div class="field">
+      <label for="exposure_mode">Exposure mode</label>
+      <select id="exposure_mode" name="exposure_mode">
+        <option value="discovery" {% if values.get('exposure_mode') == 'discovery' %}selected{% endif %}>Discovery (search, describe, execute)</option>
+        <option value="native" {% if values.get('exposure_mode') == 'native' %}selected{% endif %}>Native (each published tool as an MCP tool)</option>
+      </select>
+    </div>
+    <div class="action-row">
+      <button type="submit">Save collection</button>
+      <a class="button button-secondary" href="{{ url_for('collection_detail', collection_id=collection.id) }}">Cancel</a>
+    </div>
+  </form>
+  {% else %}
+  <form method="post" action="{{ url_for('collection_create') }}" hx-boost="false" class="form-stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field">
+      <label for="slug">Slug</label>
+      <input id="slug" name="slug" type="text" maxlength="160" required pattern="[a-z0-9][a-z0-9\-]*" value="{{ values.get('slug', '') }}" aria-describedby="slug-help">
+      <small id="slug-help">Lowercase letters, digits, and hyphens. Used in the endpoint URL and must be unique in this organization.</small>
+    </div>
+    <div class="field">
+      <label for="display_name">Display name</label>
+      <input id="display_name" name="display_name" type="text" maxlength="160" required value="{{ values.get('display_name', '') }}">
+    </div>
+    <div class="field">
+      <label for="description">Description</label>
+      <textarea id="description" name="description" maxlength="1000" rows="3">{{ values.get('description', '') }}</textarea>
+    </div>
+    <div class="field">
+      <label for="exposure_mode">Exposure mode</label>
+      <select id="exposure_mode" name="exposure_mode">
+        <option value="discovery" {% if values.get('exposure_mode') == 'discovery' %}selected{% endif %}>Discovery (search, describe, execute)</option>
+        <option value="native" {% if values.get('exposure_mode') == 'native' %}selected{% endif %}>Native (each published tool as an MCP tool)</option>
+      </select>
+    </div>
+    <div class="action-row">
+      <button type="submit">Create collection</button>
+      <a class="button button-secondary" href="{{ url_for('collection_list') }}">Cancel</a>
+    </div>
+  </form>
+  {% endif %}
+</section>

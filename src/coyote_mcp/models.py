@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Integer,
     String,
     UniqueConstraint,
     Uuid,
@@ -56,6 +57,7 @@ class MCPServer(Base):
     display_name: Mapped[str] = mapped_column(String(160))
     endpoint: Mapped[str] = mapped_column(String(2048))
     transport: Mapped[str] = mapped_column(String(32), default="streamable_http")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(32), default="pending")
     sync_generation: Mapped[int] = mapped_column(default=0)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -319,7 +321,9 @@ class BrowserSession(Base):
     )
     token_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     token_hash: Mapped[str] = mapped_column(String(128), nullable=False)
-    csrf_token_hash: Mapped[str | None] = mapped_column(String(128))
+    csrf_epoch: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     verified_group_ids: Mapped[list[str]] = mapped_column(JSONBType, default=list)
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True

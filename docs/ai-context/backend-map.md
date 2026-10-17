@@ -5,9 +5,9 @@
 | Area | Current responsibility |
 | --- | --- |
 | `app.py` | Builds FastAPI/FastMCP applications, mounts REST/OIDC routes, authenticates PAT-only MCP requests, and serves global plus request-scoped collection MCP endpoints. |
-| `console.py` | Server-rendered `/console` routes. Resolves browser sessions only, persists selection/switching of an active organization server-side with CSRF protection, and reuses centralized authorization for organization-scoped pages. `GET /console/organizations` always renders the selector for an authenticated browser session, including sessions with an active organization. Instance administrators can select any enabled organization and create departments. |
+| `console.py` | Server-rendered `/console` routes. Resolves browser sessions only, persists selection/switching of an active organization server-side with CSRF protection, and reuses centralized authorization for organization-scoped pages. `GET /console/organizations` always renders the selector for an authenticated browser session, including sessions with an active organization. Instance administrators can select any enabled organization and create departments. Server, collection, membership, and tool-publication pages delegate all state changes to `catalog.py` services. |
 | `api.py` | Authenticated control-plane endpoints for catalog, PATs, service principals, groups, and mappings. |
-| `catalog.py` | Organization-scoped server, collection, membership, catalog, and collection tool-publication queries. |
+| `catalog.py` | Organization-scoped server, collection, membership, catalog, and collection tool-publication queries and mutations. Publication services check for alias and tool conflicts, use savepoints for constraint violations, and bound list queries. |
 | `discovery.py` | Streamable HTTP tool discovery, pinned HTTP transport, reconciliation, and generation-safe sync. |
 | `gateway.py` | Publication-gated persisted-catalog MCP search, description, collection endpoint publication, execution-time authorization snapshots, spawned and resource-bounded schema validation, escaped lexical search, bounded downstream invocation, and result sanitization. Global and native endpoints resolve enabled collection publication records for discovery and invocation. |
 | `auth.py` | PAT/browser authentication, immutable authenticated organization context, session lifecycle, memberships, roles, group mappings, browser-session-only instance-admin authorization, organization creation, and batched collection-grant evaluation. |
@@ -45,8 +45,12 @@
    membership only in the new department and selects it in the session.
 5. A browser request to `/console` resolves that persisted session, evaluates
    page permission through `auth.authorize`, then renders Jinja2 HTML. HTMX
-   requests receive only the content fragment. The only current console mutation
-   is instance-admin organization creation.
+   requests receive only the content fragment. Console writes pass CSRF
+   validation, resolve the active organization, and call catalog or
+   organization services for authorization and persistence. Current writes
+   cover instance-admin department creation, server registration, edit, enable,
+   disable, discovery refresh, and removal, collection create/edit/enable and
+   membership changes, and tool publication create, edit, and unpublish.
 
 ## Extension points
 

@@ -2,16 +2,20 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coyote_mcp.auth import (
     ALL_ACTIONS,
     ExternalIdentityResolutionError,
+    OrganizationBootstrapError,
     authenticate_browser_session,
     authenticate_token,
     authorize,
     authorized_collection_ids,
     available_organizations,
     create_initial_organization,
+    csrf_token_for,
+    csrf_token_valid,
     effective_permissions,
     issue_browser_session,
     issue_pat,
@@ -19,6 +23,7 @@ from coyote_mcp.auth import (
     select_active_organization,
 )
 from coyote_mcp.models import (
+    BrowserSession,
     Collection,
     ExternalGroup,
     GroupRoleMapping,
@@ -480,6 +485,73 @@ async def test_instance_administrator_browser_context_expands_organizations_but_
     ]
     assert not await select_active_organization(session, pat_current, other.id)
     assert await select_active_organization(session, browser_current, other.id)
+
+
+@pytest.mark.asyncio
+async def test_organization_switch_persists_org_and_csrf_epoch_together(
+    session_factory: async_sessionmaker[AsyncSession], session, organization: Organization
+) -> None:
+    administrator = await create_principal(session, organization)
+    other = Organization(slug="switch-target", display_name="Switch Target")
+    session.add_all([other, InstanceAdministrator(principal_id=administrator.id)])
+    await session.commit()
+    _, browser_token = await issue_browser_session(session, administrator, [], Settings())
+    current = await authenticate_browser_session(session, browser_token)
+    assert current is not None and current.browser_session is not None
+    settings = Settings()
+    browser_session_id = current.browser_session.id
+    old_token = csrf_token_for(current.browser_session, settings)
+    old_epoch = current.browser_session.csrf_epoch
+    assert csrf_token_valid(current.browser_session, old_token, settings)
+
+    assert await select_active_organization(session, current, other.id)
+
+    async with session_factory() as fresh:
+        stored = await fresh.get(BrowserSession, browser_session_id)
+    assert stored is not None
+    assert stored.active_organization_id == other.id
+    assert stored.csrf_epoch == old_epoch + 1
+    assert not csrf_token_valid(stored, old_token, settings)
+    assert csrf_token_valid(stored, csrf_token_for(stored, settings), settings)
+
+
+@pytest.mark.asyncio
+async def test_initial_organization_creation_rotates_csrf_epoch_and_rolls_back_on_duplicate(
+    session_factory: async_sessionmaker[AsyncSession], session
+) -> None:
+    administrator = Principal(identifier="bootstrap-csrf", display_name="Bootstrap Administrator")
+    session.add(administrator)
+    await session.flush()
+    session.add(InstanceAdministrator(principal_id=administrator.id))
+    await session.commit()
+    browser_session, browser_token = await issue_browser_session(
+        session, administrator, [], Settings()
+    )
+    current = await authenticate_browser_session(session, browser_token)
+    assert current is not None and current.browser_session is not None
+    settings = Settings()
+    old_token = csrf_token_for(current.browser_session, settings)
+    epoch_before = current.browser_session.csrf_epoch
+
+    created = await create_initial_organization(
+        session, current, slug="csrf-bootstrap", display_name="CSRF Bootstrap"
+    )
+    epoch_after_create = current.browser_session.csrf_epoch
+    created_id = created.id
+    assert epoch_after_create == epoch_before + 1
+    assert not csrf_token_valid(current.browser_session, old_token, settings)
+
+    with pytest.raises(OrganizationBootstrapError) as error:
+        await create_initial_organization(
+            session, current, slug="csrf-bootstrap", display_name="Duplicate"
+        )
+    assert error.value.category == "duplicate_slug"
+    assert current.browser_session.csrf_epoch == epoch_after_create
+    async with session_factory() as fresh:
+        stored = await fresh.get(BrowserSession, browser_session.id)
+    assert stored is not None
+    assert stored.csrf_epoch == epoch_after_create
+    assert stored.active_organization_id == created_id
 
 
 @pytest.mark.asyncio

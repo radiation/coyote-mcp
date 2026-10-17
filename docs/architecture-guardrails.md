@@ -33,7 +33,7 @@ that must preserve these invariants.
   organization-scoped. Only groups from validated ID-token claims participate
   in authorization.
 - **Browser sessions and OIDC transactions are server-side.** PostgreSQL stores
-  hashed opaque session/binding secrets, CSRF hashes, verified group IDs, OIDC
+  hashed opaque session/binding secrets, a CSRF rotation epoch (CSRF tokens are derived, not stored), verified group IDs, OIDC
   state, nonce, and PKCE verifier. OIDC transactions are single-use and bound
   to the initiating browser.
 - **Sensitive values are not persisted in plaintext.** PAT and session
@@ -44,7 +44,16 @@ that must preserve these invariants.
 - **Discovery protects catalog integrity.** Remote discovery validates the
   destination, disables redirects, pins DNS resolution, and uses generation
   checks with row locking. A failed or superseded discovery cannot overwrite
-  the existing tool catalog.
+  the existing tool catalog. Changing a server endpoint increments the sync
+  generation under the same row lock, so discovery against the previous
+  endpoint cannot mark the server ready for the new one.
+- **Server deletion is serialized against membership writes.** Deleting a
+  server locks its row with `FOR UPDATE` before checking memberships and
+  publications, and holds the lock through the delete. Membership inserts take
+  `FOR KEY SHARE` on the server, so a concurrent insert either commits first and
+  makes the delete refuse, or waits and then reports the server as missing. The
+  cascading foreign keys never silently remove a membership committed after
+  the check.
 - **Downstream servers are untrusted boundaries.** Tool labels, schemas, and
   annotations are untrusted metadata. Server endpoints reject embedded
   credentials and non-public/non-HTTPS destinations unless explicit broad
@@ -97,6 +106,13 @@ that must preserve these invariants.
   deadline expiry are classified in internal logs and reject the invocation
   before any downstream request is made. Schema validation permits local
   references but never retrieves remote schemas.
+- **Console administration uses shared services.** Console server, collection,
+  membership, and publication writes call catalog or organization services after
+  CSRF validation and organization-scoped authorization. Publication
+  administration is default-deny: discovery never creates a publication, and
+  unpublishing removes the tool from native and discovery MCP views and from
+  execution authorization. Duplicate tools and aliases are checked before
+  writes, with database constraints as the final guard.
 - **Migrations are additive by default.** Alembic history is the durable schema
   contract; revisions must not be rewritten and should remain backward-compatible
   where practical. Greenfield corrective revisions may rebuild transient session,
@@ -115,15 +131,9 @@ that must preserve these invariants.
 - **Credentialed downstream integrations:** The registry has no general
   downstream credential storage or propagation mechanism yet. Any future
   mechanism must preserve the secret and destination protections above.
-- **Console and semantic discovery:** The HTMX console uses only persisted
-  registry data, server-side browser sessions, and centralized authorization.
-  Its aggregate dashboard queries are organization-scoped. An authenticated,
-  enabled instance administrator may use the CSRF-protected organization form
-  to create a department. The transaction creates an owner membership only for
-  the newly created department; instance-admin access to existing departments
-  is authorization-based, not represented by synthetic roles or memberships.
-  Other CRUD, semantic discovery, auditing, metrics, and richer policy features
-  remain future work and must not create a parallel policy path.
+- **Remaining console and semantic discovery:** Semantic discovery, console audit
+  views, metrics, principal and token administration, and richer policy
+  features remain future work and must not create a parallel policy path.
 - **Fine-grained tool policy:** Publication curation controls discovery and native visibility;
   per-principal tool-specific allow and deny policies are not implemented. Tool
   annotations are untrusted metadata and never imply safety.

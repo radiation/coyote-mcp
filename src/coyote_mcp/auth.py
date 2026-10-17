@@ -255,19 +255,20 @@ async def authenticate_browser_session(
     )
 
 
-async def rotate_csrf_token(session: AsyncSession, browser_session: BrowserSession) -> str:
-    token = secrets.token_urlsafe(32)
-    browser_session.csrf_token_hash = _hash_secret(token)
-    await session.commit()
-    return token
+def csrf_token_for(browser_session: BrowserSession, settings: Settings) -> str:
+    message = f"{browser_session.token_hash}\x00{browser_session.csrf_epoch}".encode()
+    return hmac.new(
+        settings.session_secret_key.encode("utf-8"), message, hashlib.sha256
+    ).hexdigest()
 
 
-def csrf_token_valid(browser_session: BrowserSession, token: str | None) -> bool:
-    return (
-        token is not None
-        and browser_session.csrf_token_hash is not None
-        and hmac.compare_digest(browser_session.csrf_token_hash, _hash_secret(token))
-    )
+def csrf_token_valid(
+    browser_session: BrowserSession, token: str | None, settings: Settings
+) -> bool:
+    # hmac.compare_digest raises TypeError for non-ASCII str operands, so reject them first.
+    if token is None or not token.isascii():
+        return False
+    return hmac.compare_digest(csrf_token_for(browser_session, settings), token)
 
 
 async def available_organizations(
@@ -309,7 +310,10 @@ async def select_active_organization(
         await _enabled_membership(session, current.principal.id, organization_id) is None
     ):
         return False
+    # The epoch bump shares this commit with the organization change, so a form
+    # rendered for the previous organization cannot authenticate against the new one.
     current.browser_session.active_organization_id = organization_id
+    current.browser_session.csrf_epoch += 1
     await session.commit()
     return True
 
@@ -403,12 +407,58 @@ async def effective_permissions(
     return frozenset().union(*(ROLE_PERMISSIONS.get(role, frozenset()) for role in roles))
 
 
+async def has_action_grant_in_organization(
+    session: AsyncSession,
+    principal: Principal,
+    action: str,
+    organization_id: UUID,
+    verified_group_ids: frozenset[str] = frozenset(),
+    credential_context: CredentialContext = "pat",
+) -> bool:
+    """Return whether the principal holds the action via an org-wide or collection-scoped role."""
+    if action not in ALL_ACTIONS or not principal.enabled:
+        return False
+    if not await _enabled_organization(session, organization_id):
+        return False
+    if credential_context == "browser_session" and await is_instance_administrator(
+        session, principal
+    ):
+        return True
+    if await _enabled_membership(session, principal.id, organization_id) is None:
+        return False
+    roles = list(
+        (
+            await session.scalars(
+                select(RoleAssignment.role).where(
+                    RoleAssignment.principal_id == principal.id,
+                    RoleAssignment.organization_id == organization_id,
+                )
+            )
+        ).all()
+    )
+    if verified_group_ids:
+        roles.extend(
+            (
+                await session.scalars(
+                    select(GroupRoleMapping.role)
+                    .join(ExternalGroup, GroupRoleMapping.external_group_id == ExternalGroup.id)
+                    .where(
+                        GroupRoleMapping.organization_id == organization_id,
+                        ExternalGroup.external_id.in_(verified_group_ids),
+                    )
+                )
+            ).all()
+        )
+    return any(action in ROLE_PERMISSIONS.get(role, frozenset()) for role in roles)
+
+
 async def authorized_collection_ids(
     session: AsyncSession,
     principal: Principal,
     action: str,
     collections: Sequence[Collection],
     verified_group_ids: frozenset[str] = frozenset(),
+    credential_context: CredentialContext = "pat",
 ) -> frozenset[UUID]:
     if action not in ALL_ACTIONS or not principal.enabled or not collections:
         return frozenset()
@@ -416,9 +466,15 @@ async def authorized_collection_ids(
     if len(organization_ids) != 1:
         return frozenset()
     organization_id = next(iter(organization_ids))
-    if await _enabled_membership(session, principal.id, organization_id) is None:
+    if not await _enabled_organization(session, organization_id):
         return frozenset()
     candidate_ids = {collection.id for collection in collections}
+    if credential_context == "browser_session" and await is_instance_administrator(
+        session, principal
+    ):
+        return frozenset(candidate_ids)
+    if await _enabled_membership(session, principal.id, organization_id) is None:
+        return frozenset()
     scopes = list(
         (
             await session.execute(
@@ -557,6 +613,7 @@ async def create_initial_organization(
             )
         )
         current.browser_session.active_organization_id = organization.id
+        current.browser_session.csrf_epoch += 1
         await session.commit()
     except IntegrityError as error:
         await session.rollback()
