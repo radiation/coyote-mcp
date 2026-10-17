@@ -416,7 +416,10 @@ async def list_pats(session: Session, current: Current) -> list[PATResponse]:
     await require(session, current, "credential:create")
     tokens = await session.scalars(
         select(PersonalAccessToken)
-        .where(PersonalAccessToken.principal_id == current.principal.id)
+        .where(
+            PersonalAccessToken.principal_id == current.principal.id,
+            PersonalAccessToken.organization_id == current.require_organization_id(),
+        )
         .order_by(PersonalAccessToken.created_at)
     )
     return [PATResponse.model_validate(token) for token in tokens.all()]
@@ -449,6 +452,7 @@ async def revoke_pat(token_id: UUID, session: Session, current: Current) -> None
         select(PersonalAccessToken).where(
             PersonalAccessToken.id == token_id,
             PersonalAccessToken.principal_id == current.principal.id,
+            PersonalAccessToken.organization_id == current.require_organization_id(),
         )
     )
     if token is None:

@@ -10,10 +10,13 @@ from coyote_mcp.auth import (
     authenticate_token,
     authorize,
     authorized_collection_ids,
+    available_organizations,
+    create_initial_organization,
     effective_permissions,
     issue_browser_session,
     issue_pat,
     resolve_external_identity,
+    select_active_organization,
 )
 from coyote_mcp.models import (
     Collection,
@@ -339,6 +342,42 @@ async def test_instance_administrator_authorizes_enabled_ownerless_organizations
 
 
 @pytest.mark.asyncio
+async def test_instance_administrator_can_create_multiple_organizations(
+    session, organization: Organization
+) -> None:
+    administrator = Principal(identifier="bootstrap-admin", display_name="Bootstrap Administrator")
+    session.add(administrator)
+    await session.flush()
+    session.add(InstanceAdministrator(principal_id=administrator.id))
+    await session.commit()
+    _, browser_token = await issue_browser_session(session, administrator, [], Settings())
+    current = await authenticate_browser_session(session, browser_token)
+
+    assert current is not None
+    first = await create_initial_organization(
+        session, current, slug="first-bootstrap", display_name="First Bootstrap"
+    )
+    second = await create_initial_organization(
+        session, current, slug="second-bootstrap", display_name="Second Bootstrap"
+    )
+    owner_organizations = set(
+        (
+            await session.scalars(
+                select(RoleAssignment.organization_id).where(
+                    RoleAssignment.principal_id == administrator.id,
+                    RoleAssignment.role == "owner",
+                    RoleAssignment.collection_id.is_(None),
+                )
+            )
+        ).all()
+    )
+
+    assert {first.id, second.id}.issubset(owner_organizations)
+    assert current.browser_session is not None
+    assert current.browser_session.active_organization_id == second.id
+
+
+@pytest.mark.asyncio
 async def test_instance_administrator_does_not_bypass_pat_or_collection_publication_boundaries(
     session, organization: Organization
 ) -> None:
@@ -406,6 +445,41 @@ async def test_instance_administrator_narrow_pat_does_not_inherit_browser_superu
         organization.id,
         credential_context=pat_current.credential_context,
     )
+
+
+@pytest.mark.asyncio
+async def test_instance_administrator_browser_context_expands_organizations_but_pat_does_not(
+    session, organization: Organization
+) -> None:
+    administrator = await create_principal(session, organization)
+    other = Organization(slug="other-context", display_name="Other Context")
+    session.add_all([other, InstanceAdministrator(principal_id=administrator.id)])
+    await session.commit()
+    _, browser_token = await issue_browser_session(session, administrator, [], Settings())
+    _, pat_token = await issue_pat(
+        session,
+        administrator,
+        organization.id,
+        "organization-reader",
+        {"server:read"},
+        timedelta(days=1),
+        Settings(),
+    )
+
+    browser_current = await authenticate_browser_session(session, browser_token)
+    pat_current = await authenticate_token(session, pat_token)
+
+    assert browser_current is not None
+    assert pat_current is not None
+    assert {item.id for item in await available_organizations(session, browser_current)} == {
+        organization.id,
+        other.id,
+    }
+    assert [item.id for item in await available_organizations(session, pat_current)] == [
+        organization.id
+    ]
+    assert not await select_active_organization(session, pat_current, other.id)
+    assert await select_active_organization(session, browser_current, other.id)
 
 
 @pytest.mark.asyncio

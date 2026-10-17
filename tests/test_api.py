@@ -4,15 +4,24 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from coyote_mcp import api
 from coyote_mcp.app import app
-from coyote_mcp.auth import ALL_ACTIONS, authenticate_token, issue_pat
+from coyote_mcp.auth import (
+    ALL_ACTIONS,
+    AuthenticatedPrincipal,
+    authenticate_token,
+    issue_browser_session,
+    issue_pat,
+)
 from coyote_mcp.db import get_session
 from coyote_mcp.models import (
     InstanceAdministrator,
     Organization,
     OrganizationMembership,
+    PersonalAccessToken,
     Principal,
     RoleAssignment,
     Tool,
@@ -130,6 +139,119 @@ async def test_instance_administrator_read_only_pat_cannot_register_server(
         app.dependency_overrides.clear()
 
     assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_require_rejects_organization_action_without_active_organization(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        principal = Principal(identifier="no-organization", display_name="No Organization")
+        session.add(principal)
+        await session.commit()
+        current = AuthenticatedPrincipal(principal, frozenset({"server:read"}), None, None)
+
+        with pytest.raises(HTTPException, match="active organization") as error:
+            await api.require(session, current, "server:read")
+
+    assert error.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_api_rejects_browser_session_without_active_organization(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    async with session_factory() as session:
+        principal = Principal(identifier="unaffiliated-browser", display_name="Unaffiliated")
+        session.add(principal)
+        await session.commit()
+        _, cookie = await issue_browser_session(session, principal, [], Settings())
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            client.cookies.set(Settings().browser_session_cookie_name, cookie)
+            api_response = await client.get(f"/api/v1/servers/{uuid4()}")
+            console_response = await client.get("/console")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert api_response.status_code == 403
+    assert api_response.json() == {"detail": "An active organization is required."}
+    assert console_response.status_code == 200
+    assert "Select organization" in console_response.text
+
+
+@pytest.mark.asyncio
+async def test_pat_self_service_is_scoped_to_active_organization(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    async with session_factory() as session:
+        suffix = uuid4().hex
+        first = Organization(slug=f"first-{suffix}", display_name="First")
+        second = Organization(slug=f"second-{suffix}", display_name="Second")
+        principal = Principal(identifier=f"multi-{suffix}", display_name="Multi Organization")
+        session.add_all([first, second, principal])
+        await session.flush()
+        session.add_all(
+            [
+                OrganizationMembership(organization_id=first.id, principal_id=principal.id),
+                OrganizationMembership(organization_id=second.id, principal_id=principal.id),
+                RoleAssignment(organization_id=first.id, principal_id=principal.id, role="owner"),
+                RoleAssignment(organization_id=second.id, principal_id=principal.id, role="viewer"),
+            ]
+        )
+        await session.commit()
+        first_pat, first_token = await issue_pat(
+            session,
+            principal,
+            first.id,
+            "first-token",
+            {"credential:create", "credential:revoke"},
+            timedelta(days=1),
+            Settings(),
+        )
+        second_pat, _ = await issue_pat(
+            session,
+            principal,
+            second.id,
+            "second-token",
+            {"server:read"},
+            timedelta(days=1),
+            Settings(),
+        )
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            listed = await client.get(
+                "/api/v1/me/pats", headers={"Authorization": f"Bearer {first_token}"}
+            )
+            cross_organization_revoke = await client.delete(
+                f"/api/v1/me/pats/{second_pat.id}",
+                headers={"Authorization": f"Bearer {first_token}"},
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert [item["id"] for item in listed.json()] == [str(first_pat.id)]
+    assert cross_organization_revoke.status_code == 404
+    async with session_factory() as session:
+        persisted = await session.get(PersonalAccessToken, second_pat.id)
+    assert persisted is not None
+    assert persisted.revoked_at is None
 
 
 @pytest.mark.asyncio

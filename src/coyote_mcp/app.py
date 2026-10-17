@@ -213,7 +213,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="coyote-mcp", lifespan=lifespan)
 settings = Settings()
 app.state.mcp_session_factory = SessionLocal
-app.mount("/static", StaticFiles(directory="src/coyote_mcp/static"), name="static")
+app.mount("/static", StaticFiles(packages=[("coyote_mcp", "static")]), name="static")
 
 
 @app.middleware("http")

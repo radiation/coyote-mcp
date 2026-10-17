@@ -5,7 +5,7 @@
 | Area | Current responsibility |
 | --- | --- |
 | `app.py` | Builds FastAPI/FastMCP applications, mounts REST/OIDC routes, authenticates PAT-only MCP requests, and serves global plus request-scoped collection MCP endpoints. |
-| `console.py` | Server-rendered `/console` routes. Resolves browser sessions only, persists selection/switching of an active organization server-side with CSRF protection, and reuses centralized authorization for organization-scoped pages. Instance administrators can select any enabled organization and create departments. |
+| `console.py` | Server-rendered `/console` routes. Resolves browser sessions only, persists selection/switching of an active organization server-side with CSRF protection, and reuses centralized authorization for organization-scoped pages. `GET /console/organizations` always renders the selector for an authenticated browser session, including sessions with an active organization. Instance administrators can select any enabled organization and create departments. |
 | `api.py` | Authenticated control-plane endpoints for catalog, PATs, service principals, groups, and mappings. |
 | `catalog.py` | Organization-scoped server, collection, membership, catalog, and collection tool-publication queries. |
 | `discovery.py` | Streamable HTTP tool discovery, pinned HTTP transport, reconciliation, and generation-safe sync. |
@@ -37,9 +37,11 @@
    settings, stores a short-lived transaction and browser binding server-side, then atomically
    consumes it, validates the ID token, resolves a global `(issuer, subject)`
    identity, and issues an opaque persisted session. The console selects the
-   active enabled organization with a CSRF-protected POST. A global instance
-   administrator can select any enabled organization without a membership and
-   create departments through the console; creation atomically grants an owner
+   active enabled organization with a CSRF-protected POST. An authenticated
+   browser session can reopen the selector at `GET /console/organizations`,
+   even when an organization is already active. A global instance administrator
+   can select any enabled organization without a membership and create
+   departments through the console; creation atomically grants an owner
    membership only in the new department and selects it in the session.
 5. A browser request to `/console` resolves that persisted session, evaluates
    page permission through `auth.authorize`, then renders Jinja2 HTML. HTMX

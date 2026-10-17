@@ -260,6 +260,7 @@ class RoleAssignment(Base):
         Index(
             "uq_role_assignments_organization_scope",
             "principal_id",
+            "organization_id",
             "role",
             unique=True,
             postgresql_where=text("collection_id IS NULL"),

@@ -86,7 +86,7 @@ def _page_response(request: Request, page_name: str, context: dict[str, object])
 def _render_access_required(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
-        "console/login_required.html",
+        "console/login.html",
         _context(request, page_title="Sign in required"),
         status_code=status.HTTP_401_UNAUTHORIZED,
     )
@@ -167,11 +167,12 @@ async def _select_organization_page(
     *,
     creation_error: str | None = None,
     response_status: int = status.HTTP_200_OK,
+    auto_select: bool = True,
 ) -> Response:
     if current.browser_session is None:
         return _render_access_required(request)
     organizations = await available_organizations(session, current)
-    if len(organizations) == 1:
+    if auto_select and len(organizations) == 1:
         await select_active_organization(session, current, organizations[0].id)
         return RedirectResponse("/console", status_code=status.HTTP_303_SEE_OTHER)
     csrf_token = await rotate_csrf_token(session, current.browser_session)
@@ -189,6 +190,14 @@ async def _select_organization_page(
         ),
         status_code=response_status,
     )
+
+
+@router.get("/organizations")
+async def organization_selection(request: Request, session: Session) -> Response:
+    current = await _browser_principal(request, session)
+    if current is None:
+        return RedirectResponse("/console/login", status_code=status.HTTP_303_SEE_OTHER)
+    return await _select_organization_page(request, session, current, auto_select=False)
 
 
 @router.post("/organization")

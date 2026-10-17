@@ -12,7 +12,7 @@ class Page(BaseModel):
 
 class OrganizationCreate(BaseModel):
     slug: str = Field(min_length=1, max_length=160, pattern=r"^[a-z0-9][a-z0-9-]*$")
-    display_name: str = Field(min_length=1, max_length=255)
+    display_name: str = Field(min_length=1, max_length=160)
 
 
 class ServerCreate(BaseModel):

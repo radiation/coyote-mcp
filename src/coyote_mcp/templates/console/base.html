@@ -21,6 +21,7 @@
           {{ components.navigation_item('Publications', 'publications', url_for('placeholder', page_name='publications'), active_navigation|default('')) }}
           {{ components.navigation_item('Principals & Roles', 'principals', url_for('placeholder', page_name='principals'), active_navigation|default('')) }}
           {{ components.navigation_item('API Tokens', 'tokens', url_for('placeholder', page_name='tokens'), active_navigation|default('')) }}
+          <a class="navigation-item" href="{{ url_for('organization_selection') }}" hx-boost="false">Switch organization</a>
         </nav>
       </aside>
       <div class="workspace">

@@ -1,3 +1,6 @@
+import sys
+
+import pytest
 from sqlalchemy import select
 
 from coyote_mcp import cli
@@ -35,3 +38,24 @@ async def test_bootstrap_instance_administrator_creates_binding(
 
     assert await cli.bootstrap_instance_administrator("https://issuer.example", "subject-123") == 0
     assert "Instance administrator bound" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", ["bootstrap-instance-admin", "recover-instance-admin"])
+def test_main_accepts_instance_administrator_command_aliases(
+    monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    async def bootstrap(issuer: str, subject: str) -> int:
+        assert (issuer, subject) == ("https://issuer.example", "subject-123")
+        return 7
+
+    monkeypatch.setattr(cli, "bootstrap_instance_administrator", bootstrap)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["coyote-mcp", command, "--issuer", "https://issuer.example", "--subject", "subject-123"],
+    )
+
+    with pytest.raises(SystemExit) as error:
+        cli.main()
+
+    assert error.value.code == 7

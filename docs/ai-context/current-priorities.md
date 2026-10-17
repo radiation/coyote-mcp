@@ -38,14 +38,16 @@
 - **Local smoke coverage:** An optional Compose-only FastMCP mock and a live
   runner validate registration, sync, authenticated MCP discovery/description/
   execution, structured tool failures, tenant isolation, revoked-PAT denial,
-  and temporary tenant cleanup. The profile uses hostname-specific private HTTP
-  destination allowlists rather than broad SSRF development overrides.
+  and temporary tenant cleanup. The runner provisions globally unique service
+  principals with explicit owner memberships and organization-bound PATs. The
+  profile uses hostname-specific private HTTP destination allowlists rather
+  than broad SSRF development overrides.
 - **Phase 4A:** A Jinja2/HTMX administration console provides an
   organization-scoped registry overview, persisted server-health list,
   browser-session-only authentication, centralized RBAC page checks, responsive
-  dark styling, and placeholders for future management pages. Its only current
-  mutation is instance-admin organization creation; it has no separate
-  credential path.
+  dark styling, and placeholders for future management pages. Its shell exposes
+  an active-session organization chooser for membership switching and
+  instance-admin department creation. It has no separate credential path.
 - **Phase 4A.1:** Global principals, explicit enabled organization memberships,
   server-side active browser-session organization selection, one environment-
   configured OIDC provider, instance administrators, and immutable request
@@ -62,6 +64,10 @@
   legacy `default` seed, while preserving a default department with dependent
   data. Fresh deployments therefore begin without departments until an instance
   administrator creates one.
+- **Organization role uniqueness correction:** Migration `0016` scopes
+  organization-wide role uniqueness by principal, organization, and role. A
+  global instance administrator can therefore receive an owner role when
+  creating each new department.
 - **Phase 4A instance administration:** Enabled instance administrators are
   browser-session superusers for every enabled organization and can recover
   ownerless departments without synthetic memberships or owner roles. They can

@@ -299,6 +299,95 @@ async def test_instance_administrator_can_create_first_organization(
 
 
 @pytest.mark.asyncio
+async def test_active_instance_administrator_can_reopen_chooser_and_create_organization(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    cookie, first, principal = await _browser_session(session_factory, instance_administrator=True)
+    app.dependency_overrides[get_session] = override_session
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", follow_redirects=False
+        ) as client:
+            client.cookies.set(Settings().browser_session_cookie_name, cookie)
+            dashboard = await client.get("/console")
+            chooser = await client.get("/console/organizations")
+            created = await client.post(
+                "/console/organizations",
+                data={
+                    "csrf_token": _csrf_token(chooser),
+                    "slug": "second-organization",
+                    "display_name": "Second Organization",
+                },
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert dashboard.status_code == 200
+    assert "Switch organization" in dashboard.text
+    assert 'hx-boost="false"' in dashboard.text
+    assert chooser.status_code == 200
+    assert first.display_name in chooser.text
+    assert "Create organization" in chooser.text
+    assert created.status_code == 303
+    async with session_factory() as session:
+        second = await session.scalar(
+            select(Organization).where(Organization.slug == "second-organization")
+        )
+        browser_session = await session.scalar(
+            select(BrowserSession).where(BrowserSession.principal_id == principal.id)
+        )
+    assert second is not None
+    assert browser_session is not None
+    assert browser_session.active_organization_id == second.id
+
+
+@pytest.mark.asyncio
+async def test_active_member_can_reopen_chooser_and_switch_organization(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    cookie, first, principal = await _browser_session(session_factory)
+    async with session_factory() as session:
+        second = Organization(slug="switch-target", display_name="Switch Target")
+        session.add(second)
+        await session.flush()
+        session.add(OrganizationMembership(organization_id=second.id, principal_id=principal.id))
+        await session.commit()
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", follow_redirects=False
+        ) as client:
+            client.cookies.set(Settings().browser_session_cookie_name, cookie)
+            chooser = await client.get("/console/organizations")
+            switched = await client.post(
+                "/console/organization",
+                data={"csrf_token": _csrf_token(chooser), "organization_id": str(second.id)},
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert chooser.status_code == 200
+    assert first.display_name in chooser.text
+    assert second.display_name in chooser.text
+    assert switched.status_code == 303
+    async with session_factory() as session:
+        browser_session = await session.scalar(
+            select(BrowserSession).where(BrowserSession.principal_id == principal.id)
+        )
+    assert browser_session is not None
+    assert browser_session.active_organization_id == second.id
+
+
+@pytest.mark.asyncio
 async def test_non_administrator_cannot_create_first_organization_directly(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -551,3 +640,84 @@ async def test_ordinary_user_cannot_select_unrelated_organization(
     assert organization.display_name in select_page.text
     assert "Additional Department" in select_page.text
     assert denied.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_console_rejects_invalid_organization_forms_and_unknown_pages(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    cookie, _ = await _unaffiliated_browser_session(session_factory, instance_administrator=True)
+    app.dependency_overrides[get_session] = override_session
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", follow_redirects=False
+        ) as client:
+            client.cookies.set(Settings().browser_session_cookie_name, cookie)
+            select_page = await client.get("/console")
+            invalid_create = await client.post(
+                "/console/organizations",
+                data={
+                    "csrf_token": _csrf_token(select_page),
+                    "slug": "Invalid Slug",
+                    "display_name": "Invalid",
+                },
+            )
+            csrf_token = (await client.get("/auth/oidc/csrf")).json()["csrf_token"]
+            invalid_selection = await client.post(
+                "/console/organization",
+                data={"csrf_token": csrf_token, "organization_id": "not-a-uuid"},
+            )
+            unknown = await client.get("/console/unknown")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert invalid_create.status_code == 422
+    assert "Enter a valid organization slug" in invalid_create.text
+    assert invalid_selection.status_code == 403
+    assert unknown.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_console_placeholder_pages_select_organization_and_enforce_page_rbac(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    owner_cookie, _, owner = await _browser_session(session_factory)
+    viewer_cookie, _, _ = await _browser_session(session_factory, role="viewer")
+    async with session_factory() as session:
+        browser_session = await session.scalar(
+            select(BrowserSession).where(BrowserSession.principal_id == owner.id)
+        )
+        assert browser_session is not None
+        browser_session.active_organization_id = None
+        await session.commit()
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", follow_redirects=False
+        ) as client:
+            unauthenticated = await client.get("/console/servers")
+            client.cookies.set(Settings().browser_session_cookie_name, owner_cookie)
+            selected = await client.get("/console/servers")
+            servers = await client.get("/console/servers")
+            principals = await client.get("/console/principals")
+            client.cookies.set(Settings().browser_session_cookie_name, viewer_cookie)
+            forbidden = await client.get("/console/principals")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert unauthenticated.status_code == 303
+    assert selected.status_code == 303
+    assert selected.headers["location"] == "/console"
+    assert servers.status_code == 200
+    assert "MCP Servers" in servers.text
+    assert principals.status_code == 200
+    assert forbidden.status_code == 403

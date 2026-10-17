@@ -360,6 +360,39 @@ async def test_oidc_binding_cookie_is_not_shared_between_localhost_and_loopback(
 
 
 @pytest.mark.asyncio
+async def test_oidc_login_reports_invalid_configuration_and_discovery_failure(
+    session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    async def unavailable_discovery(_: OIDCProviderConfiguration) -> dict[str, object]:
+        raise ValueError("unavailable")
+
+    def invalid_provider(_: Settings) -> OIDCProviderConfiguration:
+        raise ValueError("invalid configuration")
+
+    oidc_provider = Settings.oidc_provider
+    monkeypatch.setattr(Settings, "oidc_provider", invalid_provider)
+    app.dependency_overrides[get_session] = override_session
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            invalid_configuration = await client.get("/auth/oidc/login")
+            monkeypatch.setattr(Settings, "oidc_provider", oidc_provider)
+            configured_provider(monkeypatch)
+            monkeypatch.setattr(oidc, "_discovery", unavailable_discovery)
+            unavailable_provider = await client.get("/auth/oidc/login")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert invalid_configuration.status_code == 503
+    assert unavailable_provider.status_code == 502
+
+
+@pytest.mark.asyncio
 async def test_oidc_callback_logs_safe_identity_validation_diagnostics(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,

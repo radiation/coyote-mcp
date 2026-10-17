@@ -95,7 +95,7 @@ class Settings(BaseSettings):
         assert self.oidc_client_id is not None
         assert self.oidc_client_secret is not None
         assert self.oidc_redirect_uri is not None
-        issuer = self.oidc_issuer.rstrip("/")
+        issuer = self.oidc_issuer
         issuer_parts = urlsplit(issuer)
         redirect_uri = self.oidc_redirect_uri
         redirect_parts = urlsplit(redirect_uri)

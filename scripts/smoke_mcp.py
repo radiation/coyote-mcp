@@ -23,6 +23,7 @@ from coyote_mcp.models import (
     CollectionMembership,
     MCPServer,
     Organization,
+    OrganizationMembership,
     PersonalAccessToken,
     Principal,
     RoleAssignment,
@@ -39,13 +40,19 @@ async def create_tenant(session: AsyncSession, settings: Settings, suffix: str) 
     session.add(organization)
     await session.flush()
     owner = Principal(
-        organization_id=organization.id,
-        identifier="smoke-owner",
+        identifier=f"smoke-owner-{suffix}",
         display_name="Smoke Owner",
         identity_type="service",
     )
     session.add(owner)
     await session.flush()
+    session.add(
+        OrganizationMembership(
+            organization_id=organization.id,
+            principal_id=owner.id,
+            enabled=True,
+        )
+    )
     session.add(
         RoleAssignment(organization_id=organization.id, principal_id=owner.id, role="owner")
     )
@@ -53,6 +60,7 @@ async def create_tenant(session: AsyncSession, settings: Settings, suffix: str) 
     _, token = await issue_pat(
         session,
         owner,
+        organization.id,
         "smoke-owner",
         set(ALL_ACTIONS),
         timedelta(minutes=10),
@@ -64,6 +72,15 @@ async def create_tenant(session: AsyncSession, settings: Settings, suffix: str) 
 
 
 async def delete_tenant(session: AsyncSession, organization_id: UUID) -> None:
+    principal_ids = list(
+        (
+            await session.scalars(
+                select(OrganizationMembership.principal_id).where(
+                    OrganizationMembership.organization_id == organization_id
+                )
+            )
+        ).all()
+    )
     server_ids = select(MCPServer.id).where(MCPServer.organization_id == organization_id)
     await session.execute(delete(Tool).where(Tool.server_id.in_(server_ids)))
     await session.execute(
@@ -77,7 +94,13 @@ async def delete_tenant(session: AsyncSession, organization_id: UUID) -> None:
         delete(PersonalAccessToken).where(PersonalAccessToken.organization_id == organization_id)
     )
     await session.execute(delete(Collection).where(Collection.organization_id == organization_id))
-    await session.execute(delete(Principal).where(Principal.organization_id == organization_id))
+    await session.execute(
+        delete(OrganizationMembership).where(
+            OrganizationMembership.organization_id == organization_id
+        )
+    )
+    if principal_ids:
+        await session.execute(delete(Principal).where(Principal.id.in_(principal_ids)))
     await session.execute(delete(Organization).where(Organization.id == organization_id))
     await session.commit()
 
