@@ -2,7 +2,7 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -24,6 +24,7 @@ from coyote_mcp.discovery import (
 )
 from coyote_mcp.models import (
     Collection,
+    CollectionMembership,
     CollectionToolPublication,
     MCPServer,
     OIDCLoginTransaction,
@@ -336,3 +337,102 @@ async def test_postgres_concurrent_sync_rejects_stale_result(
 
     assert second_result.status == "ready"
     assert [tool.name for tool in tools] == ["current"]
+
+
+async def seed_server_with_collection(
+    postgres_sessions: async_sessionmaker[AsyncSession],
+) -> tuple[UUID, UUID, UUID, AuthenticatedPrincipal]:
+    async with postgres_sessions() as session:
+        organization = Organization(slug="postgres", display_name="PostgreSQL")
+        session.add(organization)
+        await session.commit()
+        server = await catalog.create_server(
+            session, organization.id, server_request("delete-race")
+        )
+        collection = await catalog.create_collection(
+            session,
+            organization.id,
+            CollectionCreate(slug="delete-race", display_name="Delete Race"),
+        )
+        principal = Principal(identifier=f"owner-{uuid4().hex}", display_name="Owner")
+        session.add(principal)
+        await session.flush()
+        session.add(
+            OrganizationMembership(organization_id=organization.id, principal_id=principal.id)
+        )
+        session.add(
+            RoleAssignment(organization_id=organization.id, principal_id=principal.id, role="owner")
+        )
+        await session.commit()
+        current = AuthenticatedPrincipal(
+            principal, frozenset({"server:update"}), None, organization.id
+        )
+        return organization.id, server.id, collection.id, current
+
+
+@pytest.mark.asyncio
+async def test_postgres_server_delete_waits_for_membership_insert(
+    postgres_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    organization_id, server_id, collection_id, current = await seed_server_with_collection(
+        postgres_sessions
+    )
+    async with postgres_sessions() as inserting_session:
+        inserting_session.add(
+            CollectionMembership(
+                collection_id=collection_id,
+                server_id=server_id,
+                organization_id=organization_id,
+                enabled=True,
+            )
+        )
+        # The foreign-key check holds a KEY SHARE lock on the server row until commit.
+        await inserting_session.flush()
+        async with postgres_sessions() as deleting_session:
+            delete_task = asyncio.create_task(
+                catalog.delete_server(deleting_session, current, server_id)
+            )
+            await asyncio.sleep(0.2)
+            assert not delete_task.done()
+            await inserting_session.commit()
+            with pytest.raises(catalog.ServerInUseError):
+                await delete_task
+
+    async with postgres_sessions() as verify_session:
+        assert await verify_session.get(MCPServer, server_id) is not None
+        assert (
+            await verify_session.get(CollectionMembership, (collection_id, server_id)) is not None
+        )
+
+
+@pytest.mark.asyncio
+async def test_postgres_membership_insert_waits_for_server_delete(
+    postgres_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    organization_id, server_id, collection_id, _ = await seed_server_with_collection(
+        postgres_sessions
+    )
+    async with postgres_sessions() as deleting_session:
+        server = await deleting_session.scalar(
+            select(MCPServer).where(MCPServer.id == server_id).with_for_update()
+        )
+        assert server is not None
+        async with postgres_sessions() as adding_session:
+            add_task = asyncio.create_task(
+                catalog.add_membership(
+                    adding_session,
+                    organization_id,
+                    collection_id,
+                    MembershipCreate(server_id=server_id),
+                )
+            )
+            await asyncio.sleep(0.2)
+            assert not add_task.done()
+            await deleting_session.delete(server)
+            await deleting_session.commit()
+            with pytest.raises(catalog.MissingResourceError):
+                await add_task
+
+    async with postgres_sessions() as verify_session:
+        assert await verify_session.get(MCPServer, server_id) is None
+        assert await verify_session.get(CollectionMembership, (collection_id, server_id)) is None

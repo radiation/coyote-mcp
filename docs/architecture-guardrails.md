@@ -44,7 +44,16 @@ that must preserve these invariants.
 - **Discovery protects catalog integrity.** Remote discovery validates the
   destination, disables redirects, pins DNS resolution, and uses generation
   checks with row locking. A failed or superseded discovery cannot overwrite
-  the existing tool catalog.
+  the existing tool catalog. Changing a server endpoint increments the sync
+  generation under the same row lock, so discovery against the previous
+  endpoint cannot mark the server ready for the new one.
+- **Server deletion is serialized against membership writes.** Deleting a
+  server locks its row with `FOR UPDATE` before checking memberships and
+  publications, and holds the lock through the delete. Membership inserts take
+  `FOR KEY SHARE` on the server, so a concurrent insert either commits first and
+  makes the delete refuse, or waits and then reports the server as missing. The
+  cascading foreign keys never silently remove a membership committed after
+  the check.
 - **Downstream servers are untrusted boundaries.** Tool labels, schemas, and
   annotations are untrusted metadata. Server endpoints reject embedded
   credentials and non-public/non-HTTPS destinations unless explicit broad

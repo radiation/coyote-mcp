@@ -42,19 +42,36 @@ instance-administrator PAT cannot discover or execute unpublished tools.
 Phase 4B console writes (server registration, edit, enable/disable, refresh,
 removal, collection management, membership, and tool publication) require a
 valid CSRF token before authorization, resolve the active organization from the
-server-side session, and check the matching action through `auth.authorize`.
+server-side session, and check the matching action through `auth.authorize`. Authorization runs before form
+validation, and error responses (422 and 409) render only resources the caller
+has already been authorized to read. A failed validation must never load and
+render a server or collection the caller cannot update.
 Instance-admin override applies only to browser sessions. Publication state
 and publish, edit, and unpublish actions require `collection:update`, and
 published-tool visibility in the console requires the same action. Console
-pages render untrusted tool descriptions and downstream text through Jinja2
+collection pages separate authentication and organization selection from
+permission checks: they authorize the requested collection through the
+collection-aware service (`catalog.read_collection`, `require_collection_update`,
+publication services), so a collection-scoped maintainer can manage that
+collection without an organization-wide grant. The collection list is gated on
+an organization-wide `collection:read` grant (any org-wide or collection-scoped
+role). Members with no such grant receive forbidden, and the list is then filtered
+per collection in one batched query (`authorized_collection_ids`). Organization-wide
+operations (server pages, collection creation, tool catalog counts) keep
+organization-level checks. Console pages render untrusted tool descriptions and downstream text through Jinja2
 autoescaping. CSRF tokens are HMAC-SHA256 values derived from the browser
 session's stored secret hash, a non-secret `csrf_epoch` counter, and the
 configured session secret key. Nothing secret is stored, rendering does not
 write to the database, and every form rendered in one session shares a valid
 token, so several open forms can be submitted. The epoch is incremented only at
-lifecycle boundaries (organization switch), which invalidates forms opened
-before the switch. A new login creates a new session with a new token, and
-tokens never validate across sessions.
+lifecycle boundaries (organization switch and first-organization creation).
+The increment is committed in the same transaction as the active organization
+change, so a stale form cannot authenticate against the new organization. This
+invalidates forms opened before the switch. A new login creates a new session with a new token, and
+tokens never validate across sessions. Console redirects are built from a fixed
+`/console/...` prefix plus the identifier's string form, so request-derived values
+cannot change the host. A single helper then accepts only local console paths made
+of safe segments and falls back to `/console` for anything else.
 PAT scopes further attenuate permissions. External identities use issuer plus
 subject, not email. Groups are taken from validated ID-token claims and evaluated
 against organization-scoped mappings.

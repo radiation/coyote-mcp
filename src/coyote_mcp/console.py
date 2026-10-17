@@ -21,12 +21,13 @@ from coyote_mcp.auth import (
     OrganizationBootstrapError,
     authenticate_browser_session,
     authorize,
+    authorized_collection_ids,
     available_organizations,
     create_initial_organization,
     csrf_token_for,
     csrf_token_valid,
+    has_action_grant_in_organization,
     is_instance_administrator,
-    rotate_csrf_token,
     select_active_organization,
 )
 from coyote_mcp.db import get_session
@@ -115,6 +116,16 @@ def redacted_endpoint(endpoint: str) -> str:
 
 
 templates.env.filters["redacted_endpoint"] = redacted_endpoint
+
+
+_CONSOLE_LOCATION_PATTERN = re.compile(r"/console(?:/[A-Za-z0-9_-]+)*")
+
+
+def _see_other(location: str) -> RedirectResponse:
+    # Only local console paths are valid redirect targets; anything else falls back to /console.
+    if not _CONSOLE_LOCATION_PATTERN.fullmatch(location):
+        location = "/console"
+    return RedirectResponse(location, status_code=status.HTTP_303_SEE_OTHER)
 
 
 def _render_access_required(request: Request) -> HTMLResponse:
@@ -254,7 +265,6 @@ async def select_organization(request: Request, session: Session) -> Response:
         return _render_forbidden(request, current)
     if not await select_active_organization(session, current, organization_id):
         return _render_forbidden(request, current)
-    await rotate_csrf_token(session, current.browser_session, Settings())
     return RedirectResponse("/console", status_code=status.HTTP_303_SEE_OTHER)
 
 
@@ -305,7 +315,6 @@ async def create_organization(request: Request, session: Session) -> Response:
                 response_status=status.HTTP_409_CONFLICT,
             )
         return _render_forbidden(request, current)
-    await rotate_csrf_token(session, current.browser_session, Settings())
     return RedirectResponse("/console", status_code=status.HTTP_303_SEE_OTHER)
 
 
@@ -371,14 +380,27 @@ async def _organization_name(session: AsyncSession, organization_id: UUID) -> st
     return name or "Organization"
 
 
-async def _page_principal(
-    request: Request, session: AsyncSession, action: str
+async def _organization_principal(
+    request: Request, session: AsyncSession
 ) -> AuthenticatedPrincipal | Response:
+    """Authenticate and select an organization without an organization-wide permission check.
+
+    Collection-scoped pages must authorize the specific collection in the service layer.
+    """
     current = await _browser_principal(request, session)
     if current is None:
         return RedirectResponse("/console/login", status_code=status.HTTP_303_SEE_OTHER)
     if current.organization_id is None:
         return await _select_organization_page(request, session, current)
+    return current
+
+
+async def _page_principal(
+    request: Request, session: AsyncSession, action: str
+) -> AuthenticatedPrincipal | Response:
+    current = await _organization_principal(request, session)
+    if isinstance(current, Response):
+        return current
     if not await _authorized(session, current, action):
         return _render_forbidden(request, current)
     return current
@@ -558,7 +580,7 @@ async def server_register(request: Request, session: Session) -> Response:
         )
     except catalog.AuthorizationError:
         return _render_forbidden(request, current)
-    return RedirectResponse(f"/console/servers/{server.id}", status_code=status.HTTP_303_SEE_OTHER)
+    return _see_other("/console/servers/" + str(server.id))
 
 
 @router.get("/servers/{server_id}", response_class=HTMLResponse)
@@ -601,6 +623,12 @@ async def server_update(server_id: UUID, request: Request, session: Session) -> 
     if isinstance(result, Response):
         return result
     current, form = result
+    try:
+        server = await catalog.require_server_update(session, current, server_id)
+    except catalog.MissingResourceError:
+        return _render_not_found(request, current)
+    except catalog.AuthorizationError:
+        return _render_forbidden(request, current)
     display_name = _form_text(form, "display_name")
     endpoint = _form_text(form, "endpoint")
     try:
@@ -613,10 +641,6 @@ async def server_update(server_id: UUID, request: Request, session: Session) -> 
     except catalog.AuthorizationError:
         return _render_forbidden(request, current)
     except (ValidationError, UnsafeEndpointError) as error:
-        try:
-            server = await catalog.get_server(session, current.require_organization_id(), server_id)
-        except catalog.MissingResourceError:
-            return _render_not_found(request, current)
         message = (
             str(error)
             if isinstance(error, UnsafeEndpointError)
@@ -631,7 +655,7 @@ async def server_update(server_id: UUID, request: Request, session: Session) -> 
             error=message,
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         )
-    return RedirectResponse(f"/console/servers/{server_id}", status_code=status.HTTP_303_SEE_OTHER)
+    return _see_other("/console/servers/" + str(server_id))
 
 
 @router.post("/servers/{server_id}/enabled")
@@ -649,7 +673,7 @@ async def server_set_enabled(server_id: UUID, request: Request, session: Session
         return _render_not_found(request, current)
     except catalog.AuthorizationError:
         return _render_forbidden(request, current)
-    return RedirectResponse(f"/console/servers/{server_id}", status_code=status.HTTP_303_SEE_OTHER)
+    return _see_other("/console/servers/" + str(server_id))
 
 
 @router.post("/servers/{server_id}/sync")
@@ -667,7 +691,7 @@ async def server_sync(server_id: UUID, request: Request, session: Session) -> Re
     except SyncFailedError, SyncSupersededError, LookupError:
         # The failure is persisted on the server record and shown on its detail page.
         pass
-    return RedirectResponse(f"/console/servers/{server_id}", status_code=status.HTTP_303_SEE_OTHER)
+    return _see_other("/console/servers/" + str(server_id))
 
 
 @router.post("/servers/{server_id}/delete")
@@ -842,18 +866,31 @@ async def _collection_action_error(
 
 @router.get("/collections", response_class=HTMLResponse)
 async def collection_list(request: Request, session: Session, page: PageQuery = 1) -> Response:
-    gate = await _page_principal(request, session, "collection:read")
+    gate = await _organization_principal(request, session)
     if isinstance(gate, Response):
         return gate
     organization_id = gate.require_organization_id()
+    if not await has_action_grant_in_organization(
+        session,
+        gate.principal,
+        "collection:read",
+        organization_id,
+        gate.verified_group_ids,
+        credential_context=gate.credential_context,
+    ):
+        return _render_forbidden(request, gate)
     collections = await catalog.list_collections(
         session, organization_id, PAGE_SIZE + 1, (page - 1) * PAGE_SIZE
     )
-    visible = [
-        collection
-        for collection in collections
-        if await _collection_allows(session, gate, collection, "collection:read")
-    ]
+    readable_ids = await authorized_collection_ids(
+        session,
+        gate.principal,
+        "collection:read",
+        collections,
+        gate.verified_group_ids,
+        credential_context=gate.credential_context,
+    )
+    visible = [collection for collection in collections if collection.id in readable_ids]
     return _page_response(
         request,
         "collection_list",
@@ -925,9 +962,7 @@ async def collection_create(request: Request, session: Session) -> Response:
         )
     except catalog.AuthorizationError:
         return _render_forbidden(request, current)
-    return RedirectResponse(
-        f"/console/collections/{collection.id}", status_code=status.HTTP_303_SEE_OTHER
-    )
+    return _see_other("/console/collections/" + str(collection.id))
 
 
 @router.get("/collections/{collection_id}", response_class=HTMLResponse)
@@ -938,7 +973,7 @@ async def collection_detail(
     page: PageQuery = 1,
     published_page: PageQuery = 1,
 ) -> Response:
-    gate = await _page_principal(request, session, "collection:read")
+    gate = await _organization_principal(request, session)
     if isinstance(gate, Response):
         return gate
     try:
@@ -954,7 +989,7 @@ async def collection_detail(
 
 @router.get("/collections/{collection_id}/edit", response_class=HTMLResponse)
 async def collection_edit_form(collection_id: UUID, request: Request, session: Session) -> Response:
-    gate = await _page_principal(request, session, "collection:update")
+    gate = await _organization_principal(request, session)
     if isinstance(gate, Response):
         return gate
     try:
@@ -1019,9 +1054,7 @@ async def collection_update(collection_id: UUID, request: Request, session: Sess
             ),
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         )
-    return RedirectResponse(
-        f"/console/collections/{collection_id}", status_code=status.HTTP_303_SEE_OTHER
-    )
+    return _see_other("/console/collections/" + str(collection_id))
 
 
 @router.post("/collections/{collection_id}/enabled")
@@ -1043,9 +1076,7 @@ async def collection_set_enabled(
         return _render_not_found(request, current)
     except catalog.AuthorizationError:
         return _render_forbidden(request, current)
-    return RedirectResponse(
-        f"/console/collections/{collection_id}", status_code=status.HTTP_303_SEE_OTHER
-    )
+    return _see_other("/console/collections/" + str(collection_id))
 
 
 @router.post("/collections/{collection_id}/servers")
@@ -1084,9 +1115,7 @@ async def collection_add_server(
         )
     except catalog.AuthorizationError:
         return _render_forbidden(request, current)
-    return RedirectResponse(
-        f"/console/collections/{collection_id}", status_code=status.HTTP_303_SEE_OTHER
-    )
+    return _see_other("/console/collections/" + str(collection_id))
 
 
 @router.post("/collections/{collection_id}/servers/{server_id}/remove")
@@ -1110,9 +1139,7 @@ async def collection_remove_server(
         )
     except catalog.AuthorizationError:
         return _render_forbidden(request, current)
-    return RedirectResponse(
-        f"/console/collections/{collection_id}", status_code=status.HTTP_303_SEE_OTHER
-    )
+    return _see_other("/console/collections/" + str(collection_id))
 
 
 TOOL_CHOICE_MESSAGE = "Choose a tool that is available in this collection."
@@ -1337,7 +1364,7 @@ async def collection_publications(
     page: PageQuery = 1,
     published_page: PageQuery = 1,
 ) -> Response:
-    gate = await _page_principal(request, session, "collection:update")
+    gate = await _organization_principal(request, session)
     if isinstance(gate, Response):
         return gate
     try:
@@ -1414,10 +1441,7 @@ async def publication_create(collection_id: UUID, request: Request, session: Ses
         )
     except catalog.AuthorizationError:
         return _render_forbidden(request, current)
-    return RedirectResponse(
-        f"/console/collections/{collection_id}/publications",
-        status_code=status.HTTP_303_SEE_OTHER,
-    )
+    return _see_other("/console/collections/" + str(collection_id) + "/publications")
 
 
 @router.get(
@@ -1427,7 +1451,7 @@ async def publication_create(collection_id: UUID, request: Request, session: Ses
 async def publication_edit_form(
     collection_id: UUID, publication_id: UUID, request: Request, session: Session
 ) -> Response:
-    gate = await _page_principal(request, session, "collection:update")
+    gate = await _organization_principal(request, session)
     if isinstance(gate, Response):
         return gate
     try:
@@ -1498,10 +1522,7 @@ async def publication_update(
         return _render_not_found(request, current)
     except catalog.AuthorizationError:
         return _render_forbidden(request, current)
-    return RedirectResponse(
-        f"/console/collections/{collection_id}/publications",
-        status_code=status.HTTP_303_SEE_OTHER,
-    )
+    return _see_other("/console/collections/" + str(collection_id) + "/publications")
 
 
 @router.post("/collections/{collection_id}/publications/{publication_id}/remove")
@@ -1525,10 +1546,7 @@ async def publication_remove(
         )
     except catalog.AuthorizationError:
         return _render_forbidden(request, current)
-    return RedirectResponse(
-        f"/console/collections/{collection_id}/publications",
-        status_code=status.HTTP_303_SEE_OTHER,
-    )
+    return _see_other("/console/collections/" + str(collection_id) + "/publications")
 
 
 @router.get("/{page_name}", response_class=HTMLResponse)

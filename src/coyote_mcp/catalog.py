@@ -73,6 +73,23 @@ async def get_server(session: AsyncSession, organization_id: UUID, server_id: UU
     return server
 
 
+async def _lock_server(
+    session: AsyncSession, organization_id: UUID, server_id: UUID, *, key_share: bool = False
+) -> MCPServer:
+    # FOR UPDATE serializes endpoint changes and deletion. FOR KEY SHARE is what
+    # foreign-key inserts take on the parent row, so membership inserts wait for it.
+    statement = (
+        select(MCPServer)
+        .where(MCPServer.id == server_id, MCPServer.organization_id == organization_id)
+        .with_for_update(key_share=key_share)
+        .execution_options(populate_existing=True)
+    )
+    server = await session.scalar(statement)
+    if server is None:
+        raise MissingResourceError("Server not found.")
+    return server
+
+
 async def list_servers(
     session: AsyncSession, organization_id: UUID, limit: int, offset: int
 ) -> list[MCPServer]:
@@ -151,23 +168,32 @@ async def register_server(
     return await create_server(session, current.require_organization_id(), request)
 
 
+async def require_server_update(
+    session: AsyncSession, current: AuthenticatedPrincipal, server_id: UUID
+) -> MCPServer:
+    return await _authorized_server(session, current, "server:update", server_id)
+
+
 async def update_server(
     session: AsyncSession, current: AuthenticatedPrincipal, server_id: UUID, request: ServerUpdate
 ) -> MCPServer:
-    server = await _authorized_server(session, current, "server:update", server_id)
+    await _authorized_server(session, current, "server:update", server_id)
     endpoint: str | None = None
     if request.endpoint is not None:
         endpoint = str(request.endpoint)
         validate_endpoint(endpoint, Settings())
+    locked_server = await _lock_server(session, current.require_organization_id(), server_id)
     if request.display_name is not None:
-        server.display_name = request.display_name
-    if endpoint is not None and endpoint != server.endpoint:
-        server.endpoint = endpoint
-        server.status = "pending"
-        server.last_sync_error = None
+        locked_server.display_name = request.display_name
+    if endpoint is not None and endpoint != locked_server.endpoint:
+        locked_server.endpoint = endpoint
+        locked_server.status = "pending"
+        locked_server.last_sync_error = None
+        # Invalidates any in-flight discovery that targeted the previous endpoint.
+        locked_server.sync_generation += 1
     await session.commit()
-    await session.refresh(server)
-    return server
+    await session.refresh(locked_server)
+    return locked_server
 
 
 async def set_server_enabled(
@@ -184,17 +210,20 @@ async def delete_server(
     session: AsyncSession, current: AuthenticatedPrincipal, server_id: UUID
 ) -> None:
     server = await _authorized_server(session, current, "server:update", server_id)
+    # The row lock is held through the dependency checks and the delete, so a concurrent
+    # membership insert waits instead of committing after the checks and being cascaded away.
+    locked_server = await _lock_server(session, current.require_organization_id(), server.id)
     has_memberships = (
         await session.scalars(
             select(CollectionMembership.server_id)
-            .where(CollectionMembership.server_id == server.id)
+            .where(CollectionMembership.server_id == locked_server.id)
             .limit(1)
         )
     ).first()
     has_publications = (
         await session.scalars(
             select(CollectionToolPublication.id)
-            .where(CollectionToolPublication.server_id == server.id)
+            .where(CollectionToolPublication.server_id == locked_server.id)
             .limit(1)
         )
     ).first()
@@ -202,7 +231,7 @@ async def delete_server(
         raise ServerInUseError(
             "Remove this server from all collections and unpublish its tools before deleting it."
         )
-    await session.delete(server)
+    await session.delete(locked_server)
     await session.commit()
 
 
@@ -324,7 +353,7 @@ async def add_membership(
     session: AsyncSession, organization_id: UUID, collection_id: UUID, request: MembershipCreate
 ) -> CollectionMembership:
     await get_collection(session, organization_id, collection_id)
-    await get_server(session, organization_id, request.server_id)
+    await _lock_server(session, organization_id, request.server_id, key_share=True)
     membership = CollectionMembership(
         collection_id=collection_id,
         server_id=request.server_id,

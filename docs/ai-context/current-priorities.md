@@ -88,7 +88,11 @@
   existing `collection:manage_members` action. Removing a server from a
   collection also removes its publications in that collection. The page shows
   the endpoint as `/mcp/collections/{slug}` derived from the request origin, so
-  it must be checked behind a reverse proxy.
+  it must be checked behind a reverse proxy. Collection pages authorize each
+  collection individually, so collection-scoped roles work without an
+  organization-wide grant; the collection list shows only collections the
+  viewer may read. Pagination filters each page after fetching it, so a
+  restricted user can see a short page even when more collections exist.
 - **Phase 4B tool publication:** The Tool Catalog page lists bounded, paginated
   discovered tools. Publication state is shown only to principals with
   organization-wide `collection:update`. Each collection has a publications page
@@ -103,7 +107,9 @@
   HMAC-SHA256 from the browser session's stored secret hash, a `csrf_epoch`
   counter (migration `0018`), and the session secret key. Rendering reuses the
   token, so several open forms can each be submitted. Only lifecycle boundaries
-  rotate it: an organization switch increments the epoch, and new sessions
+  rotate it: an organization switch (including automatic selection) or first-organization
+  creation increments the epoch in the same transaction as the active organization change,
+  so an old form cannot pair the new organization with the previous token. New sessions
   receive new tokens. Missing, invalid, and cross-session tokens are rejected.
 
 ## Next

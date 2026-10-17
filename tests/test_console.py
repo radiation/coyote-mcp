@@ -15,6 +15,7 @@ from coyote_mcp.auth import (
     csrf_token_for,
     issue_browser_session,
 )
+from coyote_mcp.console import _see_other
 from coyote_mcp.db import get_session
 from coyote_mcp.discovery import DiscoveredTool, DiscoveryService
 from coyote_mcp.models import (
@@ -902,6 +903,9 @@ async def test_server_writes_require_csrf_token(
         forged_token = await client.post(
             f"/console/servers/{server_id}/delete", data={"csrf_token": "forged"}
         )
+        non_ascii_token = await client.post(
+            f"/console/servers/{server_id}/delete", data={"csrf_token": "tokén-é"}
+        )
         missing_create = await client.post(
             "/console/servers",
             data={
@@ -913,6 +917,7 @@ async def test_server_writes_require_csrf_token(
 
     assert missing_token.status_code == 403
     assert forged_token.status_code == 403
+    assert non_ascii_token.status_code == 403
     assert missing_create.status_code == 403
     target = await _load_server(session_factory, "csrf-target")
     assert target is not None
@@ -1074,6 +1079,39 @@ async def test_edit_server_validates_endpoint_and_resets_discovery_state(
     assert server.display_name == "Renamed server"
     assert server.status == "pending"
     assert server.last_sync_error is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["viewer", None])
+async def test_server_edit_checks_authorization_before_validation_errors(
+    session_factory: async_sessionmaker[AsyncSession], public_dns: None, role: str | None
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role=role)
+    server_id = await _create_server(
+        session_factory,
+        organization.id,
+        "guarded-server",
+        endpoint="https://downstream.example.test/private/mcp?token=supersecret",
+    )
+    csrf_token = await _csrf_for_cookie(session_factory, cookie)
+
+    async with _console_client(session_factory, cookie) as client:
+        response = await client.post(
+            f"/console/servers/{server_id}/edit",
+            data={
+                "csrf_token": csrf_token,
+                "display_name": "Renamed server",
+                "endpoint": "https://internal.example.test/mcp",
+            },
+        )
+
+    assert response.status_code == 403
+    assert "Guarded-Server" not in response.text
+    assert "downstream.example.test" not in response.text
+    server = await _load_server(session_factory, "guarded-server")
+    assert server is not None
+    assert server.display_name == "Guarded-Server"
+    assert server.endpoint == "https://downstream.example.test/private/mcp?token=supersecret"
 
 
 @pytest.mark.asyncio
@@ -1246,6 +1284,111 @@ async def test_instance_admin_reads_collections_without_membership_role(
     assert admin_listing.status_code == 200
     assert "admin-visible-collection" in admin_listing.text
     assert member_listing.status_code == 403
+
+
+async def _grant_collection_role(
+    session_factory: async_sessionmaker[AsyncSession],
+    organization_id: UUID,
+    principal_id: UUID,
+    collection_id: UUID,
+    role: str,
+) -> None:
+    async with session_factory() as session:
+        session.add(
+            RoleAssignment(
+                organization_id=organization_id,
+                principal_id=principal_id,
+                collection_id=collection_id,
+                role=role,
+            )
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_collection_maintainer_manages_only_assigned_collection(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, principal = await _browser_session(session_factory, role="viewer")
+    managed = await _create_collection(session_factory, organization.id, "managed-collection")
+    other = await _create_collection(session_factory, organization.id, "other-collection")
+    await _grant_collection_role(
+        session_factory, organization.id, principal.id, managed, "maintainer"
+    )
+
+    async with _console_client(session_factory, cookie) as client:
+        managed_edit = await client.get(f"/console/collections/{managed}/edit")
+        managed_publications = await client.get(f"/console/collections/{managed}/publications")
+        other_edit = await client.get(f"/console/collections/{other}/edit")
+        other_publications = await client.get(f"/console/collections/{other}/publications")
+
+    assert managed_edit.status_code == 200
+    assert managed_publications.status_code == 200
+    assert other_edit.status_code == 403
+    assert other_publications.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_collection_scoped_member_lists_and_opens_only_assigned_collections(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, principal = await _browser_session(session_factory, role=None)
+    shared = await _create_collection(session_factory, organization.id, "shared-collection")
+    private = await _create_collection(session_factory, organization.id, "private-collection")
+    await _grant_collection_role(session_factory, organization.id, principal.id, shared, "consumer")
+
+    async with _console_client(session_factory, cookie) as client:
+        listing = await client.get("/console/collections")
+        shared_detail = await client.get(f"/console/collections/{shared}")
+        private_detail = await client.get(f"/console/collections/{private}")
+
+    assert listing.status_code == 200
+    assert "shared-collection" in listing.text
+    assert "private-collection" not in listing.text
+    assert shared_detail.status_code == 200
+    assert private_detail.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_collection_pages_reject_other_organization_collections(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, _, _ = await _browser_session(session_factory, role="owner")
+    _, foreign_organization, _ = await _browser_session(session_factory, role="owner")
+    foreign = await _create_collection(session_factory, foreign_organization.id, "foreign-one")
+
+    async with _console_client(session_factory, cookie) as client:
+        detail = await client.get(f"/console/collections/{foreign}")
+        edit = await client.get(f"/console/collections/{foreign}/edit")
+        publications = await client.get(f"/console/collections/{foreign}/publications")
+
+    assert detail.status_code == 404
+    assert edit.status_code == 404
+    assert publications.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_collection_scoped_role_cannot_write_other_collection(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, principal = await _browser_session(session_factory, role="viewer")
+    managed = await _create_collection(session_factory, organization.id, "writable-collection")
+    other = await _create_collection(session_factory, organization.id, "locked-collection")
+    await _grant_collection_role(
+        session_factory, organization.id, principal.id, managed, "maintainer"
+    )
+    token = await _csrf_for_cookie(session_factory, cookie)
+
+    async with _console_client(session_factory, cookie) as client:
+        rejected = await client.post(
+            f"/console/collections/{other}/edit",
+            data={"csrf_token": token, "display_name": "Hijacked", "description": ""},
+        )
+
+    assert rejected.status_code == 403
+    unchanged = await _load_collection(session_factory, "locked-collection")
+    assert unchanged is not None
+    assert unchanged.display_name == "Locked-Collection"
 
 
 @pytest.mark.asyncio
@@ -2280,3 +2423,37 @@ async def test_csrf_token_is_stable_per_session_and_rotates_on_organization_swit
     assert switched.status_code == 303
     assert stale.status_code == 403
     assert after_switch != first_render
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "/console/servers",
+        f"/console/servers/{uuid4()}",
+        f"/console/collections/{uuid4()}/publications",
+    ],
+)
+def test_see_other_allows_local_console_paths(location: str) -> None:
+    response = _see_other(location)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == location
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "//evil.example/console",
+        "https://evil.example/console",
+        "/console/../secrets",
+        "/console\\evil",
+        "/console?next=https://evil.example",
+        "/console/servers/abc#frag",
+        "/other/path",
+    ],
+)
+def test_see_other_falls_back_to_console_root_for_untrusted_locations(location: str) -> None:
+    response = _see_other(location)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/console"
