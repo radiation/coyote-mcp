@@ -1,9 +1,10 @@
 """Replace organization-owned identities with global principals and memberships.
 
-This corrective migration intentionally removes existing identity-provider, session,
-credential, principal, and role data. It preserves organizations and catalog data.
-Operators must reconfigure the instance OIDC provider, bootstrap an instance
-administrator, and recreate organization memberships and role assignments.
+This corrective migration intentionally removes existing session, credential,
+principal, role, and legacy identity-provider data. It preserves organizations
+and catalog data. Operators configure the instance OIDC provider through
+environment variables, bootstrap an instance administrator, and recreate
+organization memberships and role assignments.
 """
 
 from collections.abc import Sequence
@@ -36,7 +37,6 @@ _NEW_AUTH_TABLES = (
     "role_assignments",
     "personal_access_tokens",
     "browser_sessions",
-    "identity_providers",
     "external_identities",
     "external_groups",
     "group_role_mappings",

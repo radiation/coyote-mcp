@@ -415,7 +415,6 @@ class GatewayService:
             action,
             collections,
             current.verified_group_ids,
-            current.identity_provider_id,
         )
         return [collection for collection in collections if collection.id in authorized_ids]
 

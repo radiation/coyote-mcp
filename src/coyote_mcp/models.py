@@ -316,7 +316,6 @@ class BrowserSession(Base):
     active_organization_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("organizations.id", ondelete="SET NULL"), index=True
     )
-    identity_provider_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), index=True)
     token_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     token_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     csrf_token_hash: Mapped[str | None] = mapped_column(String(128))
@@ -336,9 +335,6 @@ class OIDCLoginTransaction(Base):
     __table_args__ = (UniqueConstraint("state_hash", name="uq_oidc_login_transactions_state_hash"),)
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
-    provider_id: Mapped[UUID] = mapped_column(
-        ForeignKey("identity_providers.id", ondelete="CASCADE"), nullable=False, index=True
-    )
     state_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     browser_binding_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     nonce: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -348,36 +344,6 @@ class OIDCLoginTransaction(Base):
     )
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
-class IdentityProvider(Base):
-    __tablename__ = "identity_providers"
-    __table_args__ = (
-        UniqueConstraint("name", name="uq_identity_providers_name"),
-        UniqueConstraint("issuer", name="uq_identity_providers_issuer"),
-        Index(
-            "uq_identity_providers_one_active",
-            "enabled",
-            unique=True,
-            postgresql_where=text("enabled"),
-            sqlite_where=text("enabled"),
-        ),
-    )
-
-    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
-    name: Mapped[str] = mapped_column(String(160), nullable=False)
-    issuer: Mapped[str] = mapped_column(String(2048), nullable=False)
-    client_id: Mapped[str] = mapped_column(String(512), nullable=False)
-    client_secret_reference: Mapped[str] = mapped_column(String(255), nullable=False)
-    allowed_organization: Mapped[str | None] = mapped_column(String(255))
-    group_claim: Mapped[str | None] = mapped_column(String(128))
-    trusted_endpoint_hosts: Mapped[list[str]] = mapped_column(JSONBType, default=list)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    jit_provisioning_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
-    )
 
 
 class ExternalIdentity(Base):
@@ -402,22 +368,15 @@ class ExternalGroup(Base):
     __tablename__ = "external_groups"
     __table_args__ = (
         UniqueConstraint(
-            "organization_id",
-            "identity_provider_id",
-            "external_id",
-            name="uq_external_groups_org_provider_external_id",
+            "organization_id", "external_id", name="uq_external_groups_org_external_id"
         ),
         UniqueConstraint("id", "organization_id", name="uq_external_groups_id_organization_id"),
-        ForeignKeyConstraint(
-            ["identity_provider_id"], ["identity_providers.id"], ondelete="CASCADE"
-        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     organization_id: Mapped[UUID] = mapped_column(
         ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    identity_provider_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), index=True)
     external_id: Mapped[str] = mapped_column(String(512), nullable=False)
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

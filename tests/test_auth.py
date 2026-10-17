@@ -1,10 +1,11 @@
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
 
 import pytest
+from sqlalchemy import select
 
 from coyote_mcp.auth import (
     ALL_ACTIONS,
+    ExternalIdentityResolutionError,
     authenticate_browser_session,
     authenticate_token,
     authorize,
@@ -17,6 +18,7 @@ from coyote_mcp.models import (
     Collection,
     ExternalGroup,
     GroupRoleMapping,
+    InstanceAdministrator,
     Organization,
     OrganizationMembership,
     Principal,
@@ -236,6 +238,74 @@ async def test_external_identity_jit_does_not_link_matching_email(
 
 
 @pytest.mark.asyncio
+async def test_jit_provisioning_creates_no_membership_role_or_instance_administrator(
+    session, organization: Organization
+) -> None:
+    principal = await resolve_external_identity(
+        session,
+        issuer="https://issuer.example",
+        subject="unprivileged-subject",
+        email=None,
+        display_name=None,
+        jit_provisioning_enabled=True,
+    )
+
+    assert (
+        await session.scalar(
+            select(OrganizationMembership).where(
+                OrganizationMembership.principal_id == principal.id
+            )
+        )
+        is None
+    )
+    assert (
+        await session.scalar(
+            select(RoleAssignment).where(RoleAssignment.principal_id == principal.id)
+        )
+        is None
+    )
+    assert await session.get(InstanceAdministrator, principal.id) is None
+
+
+@pytest.mark.asyncio
+async def test_external_identity_resolution_categories_missing_and_disabled_principals(
+    session, organization: Organization
+) -> None:
+    with pytest.raises(ExternalIdentityResolutionError) as missing_identity:
+        await resolve_external_identity(
+            session,
+            issuer="https://issuer.example",
+            subject="missing-subject",
+            email=None,
+            display_name=None,
+            jit_provisioning_enabled=False,
+        )
+    assert missing_identity.value.category == "identity_not_registered"
+
+    principal = await resolve_external_identity(
+        session,
+        issuer="https://issuer.example",
+        subject="disabled-subject",
+        email=None,
+        display_name=None,
+        jit_provisioning_enabled=True,
+    )
+    principal.enabled = False
+    await session.commit()
+
+    with pytest.raises(ExternalIdentityResolutionError) as disabled_principal:
+        await resolve_external_identity(
+            session,
+            issuer="https://issuer.example",
+            subject="disabled-subject",
+            email=None,
+            display_name=None,
+            jit_provisioning_enabled=False,
+        )
+    assert disabled_principal.value.category == "mapped_principal_disabled"
+
+
+@pytest.mark.asyncio
 async def test_jit_provisioning_uses_bounded_identifier_for_long_subject(
     session, organization: Organization
 ) -> None:
@@ -297,7 +367,6 @@ async def test_verified_groups_grant_roles_and_missing_claims_remove_access(
     principal = Principal(identifier="group-user", display_name="Group User")
     group = ExternalGroup(
         organization_id=organization.id,
-        identity_provider_id=uuid4(),
         external_id="engineering-id",
         display_name="Engineering",
     )
@@ -321,7 +390,6 @@ async def test_verified_groups_grant_roles_and_missing_claims_remove_access(
             "collection:read",
             collection,
             verified_group_ids=frozenset({"engineering-id"}),
-            identity_provider_id=group.identity_provider_id,
         )
     ).allowed
     assert (
@@ -337,7 +405,7 @@ async def test_browser_session_uses_hashed_verifier_and_enforces_revocation_and_
 ) -> None:
     principal = await create_principal(session, organization)
     browser_session, token = await issue_browser_session(
-        session, principal, ["verified-group"], uuid4(), Settings()
+        session, principal, ["verified-group"], Settings()
     )
     assert token not in browser_session.token_hash
     authenticated = await authenticate_browser_session(session, token)
@@ -357,9 +425,7 @@ async def test_browser_session_activity_writes_are_throttled(
     session, organization: Organization
 ) -> None:
     principal = await create_principal(session, organization)
-    browser_session, token = await issue_browser_session(
-        session, principal, [], uuid4(), Settings()
-    )
+    browser_session, token = await issue_browser_session(session, principal, [], Settings())
     original_activity = browser_session.last_activity_at
     assert await authenticate_browser_session(session, token) is not None
     await session.refresh(browser_session)
@@ -372,34 +438,25 @@ async def test_browser_session_activity_writes_are_throttled(
 
 
 @pytest.mark.asyncio
-async def test_group_mapping_requires_matching_identity_provider(
+async def test_group_mapping_grants_only_matching_verified_group(
     session, organization: Organization
 ) -> None:
     principal = Principal(identifier="provider-user", display_name="Provider User")
-    provider_a = uuid4()
-    provider_b = uuid4()
-    group_a = ExternalGroup(
+    group = ExternalGroup(
         organization_id=organization.id,
-        identity_provider_id=provider_a,
         external_id="shared-group",
-        display_name="Provider A",
-    )
-    group_b = ExternalGroup(
-        organization_id=organization.id,
-        identity_provider_id=provider_b,
-        external_id="shared-group",
-        display_name="Provider B",
+        display_name="Engineering",
     )
     collection = Collection(
         organization_id=organization.id, slug="provider", display_name="Provider"
     )
-    session.add_all([principal, group_a, group_b, collection])
+    session.add_all([principal, group, collection])
     await session.flush()
     session.add(OrganizationMembership(organization_id=organization.id, principal_id=principal.id))
     session.add(
         GroupRoleMapping(
             organization_id=organization.id,
-            external_group_id=group_a.id,
+            external_group_id=group.id,
             role="viewer",
             collection_id=collection.id,
         )
@@ -412,7 +469,6 @@ async def test_group_mapping_requires_matching_identity_provider(
             "collection:read",
             collection,
             verified_group_ids=frozenset({"shared-group"}),
-            identity_provider_id=provider_a,
         )
     ).allowed
     assert (
@@ -421,7 +477,6 @@ async def test_group_mapping_requires_matching_identity_provider(
             principal,
             "collection:read",
             collection,
-            verified_group_ids=frozenset({"shared-group"}),
-            identity_provider_id=provider_b,
+            verified_group_ids=frozenset({"other-group"}),
         )
     ).reason == "missing_permission"

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from coyote_mcp.app import app
 from coyote_mcp.auth import ALL_ACTIONS, authenticate_token, issue_pat
 from coyote_mcp.db import get_session
-from coyote_mcp.models import Organization, Principal, RoleAssignment, Tool
+from coyote_mcp.models import Organization, OrganizationMembership, Principal, RoleAssignment, Tool
 from coyote_mcp.settings import Settings
 
 
@@ -19,17 +19,24 @@ async def credentials(session_factory: async_sessionmaker[AsyncSession]) -> dict
         organization = Organization(slug=f"api-{suffix}", display_name="API")
         session.add(organization)
         await session.flush()
-        principal = Principal(
-            organization_id=organization.id, identifier=f"tester-{suffix}", display_name="Tester"
-        )
+        principal = Principal(identifier=f"tester-{suffix}", display_name="Tester")
         session.add(principal)
         await session.flush()
+        session.add(
+            OrganizationMembership(organization_id=organization.id, principal_id=principal.id)
+        )
         session.add(
             RoleAssignment(organization_id=organization.id, principal_id=principal.id, role="owner")
         )
         await session.commit()
         _, token = await issue_pat(
-            session, principal, "test", set(ALL_ACTIONS), timedelta(days=1), Settings()
+            session,
+            principal,
+            organization.id,
+            "test",
+            set(ALL_ACTIONS),
+            timedelta(days=1),
+            Settings(),
         )
     return {"Authorization": f"Bearer {token}"}
 
@@ -292,23 +299,10 @@ async def test_service_principal_credentials_are_admin_managed(
                     "lifetime_seconds": 3600,
                 },
             )
-            identity_provider = await client.post(
-                "/api/v1/identity-providers",
-                headers=headers,
-                json={
-                    "name": "Corporate",
-                    "issuer": "https://issuer.example",
-                    "client_id": "client",
-                    "client_secret_reference": "env:auto",
-                    "group_claim": "groups",
-                    "jit_provisioning_enabled": True,
-                },
-            )
             group = await client.post(
                 "/api/v1/external-groups",
                 headers=headers,
                 json={
-                    "identity_provider_id": identity_provider.json()["id"],
                     "external_id": "group-id",
                     "display_name": "Engineering",
                 },
@@ -328,7 +322,6 @@ async def test_service_principal_credentials_are_admin_managed(
     assert duplicate.status_code == 409
     assert [principal["identifier"] for principal in listed.json()] == ["automation"]
     assert issued.status_code == 201
-    assert identity_provider.status_code == 201
     assert mapping.status_code == 201
     assert disabled.status_code == 204
     async with session_factory() as session:
@@ -344,14 +337,8 @@ async def test_scoped_owner_pat_cannot_delegate_unscoped_permissions(
         organization = Organization(slug=f"scoped-{suffix}", display_name="Scoped")
         session.add(organization)
         await session.flush()
-        owner = Principal(
-            organization_id=organization.id,
-            identifier=f"owner-{suffix}",
-            display_name="Owner",
-            enabled=True,
-        )
+        owner = Principal(identifier=f"owner-{suffix}", display_name="Owner", enabled=True)
         service = Principal(
-            organization_id=organization.id,
             identifier=f"service-{suffix}",
             display_name="Service",
             identity_type="service",
@@ -361,6 +348,8 @@ async def test_scoped_owner_pat_cannot_delegate_unscoped_permissions(
         await session.flush()
         session.add_all(
             [
+                OrganizationMembership(organization_id=organization.id, principal_id=owner.id),
+                OrganizationMembership(organization_id=organization.id, principal_id=service.id),
                 RoleAssignment(
                     organization_id=organization.id, principal_id=owner.id, role="owner"
                 ),
@@ -371,7 +360,13 @@ async def test_scoped_owner_pat_cannot_delegate_unscoped_permissions(
         )
         await session.commit()
         _, token = await issue_pat(
-            session, owner, "policy-only", {"policy:manage"}, timedelta(days=1), Settings()
+            session,
+            owner,
+            organization.id,
+            "policy-only",
+            {"policy:manage"},
+            timedelta(days=1),
+            Settings(),
         )
 
     async def override_session() -> AsyncIterator[AsyncSession]:

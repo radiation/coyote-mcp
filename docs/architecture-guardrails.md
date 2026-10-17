@@ -6,8 +6,8 @@ that must preserve these invariants.
 
 ## Implemented invariants
 
-- **Organizations are isolation boundaries.** Organizations scope principals,
-  servers, collections, credentials, identity providers, groups, and sessions.
+- **Organizations are isolation boundaries.** Organizations scope memberships,
+  servers, collections, credentials, groups, and active browser-session context.
   Cross-organization catalog lookups do not reveal resources.
 - **Collections organize capabilities, not access.** A collection groups server
   tools for discovery. Collection membership never independently grants access;
@@ -22,18 +22,18 @@ that must preserve these invariants.
   to be a subset of the principal's direct role permissions; a request must
   satisfy both its token scope and current role evaluation.
 - **External identities use issuer and subject.** The immutable identity key is
-  `(organization, issuer, subject)`; email is display metadata and never the
+  `(issuer, subject)`; email is display metadata and never the
   linking key.
-- **OIDC groups are provider-scoped.** Group mappings include an identity
-  provider. Only verified groups from the provider that authenticated the
-  browser session participate in authorization.
+- **OIDC has one environment-configured instance provider.** Group mappings are
+  organization-scoped. Only groups from validated ID-token claims participate
+  in authorization.
 - **Browser sessions and OIDC transactions are server-side.** PostgreSQL stores
   hashed opaque session/binding secrets, CSRF hashes, verified group IDs, OIDC
   state, nonce, and PKCE verifier. OIDC transactions are single-use and bound
   to the initiating browser.
 - **Sensitive values are not persisted in plaintext.** PAT and session
-  verifiers are hashed. OIDC client secrets are read from a provider-specific
-  environment reference; ID, refresh, and client-secret values are not stored.
+  verifiers are hashed. The OIDC client secret is injected through settings;
+  ID, refresh, and client-secret values are not stored.
 - **The database is the authoritative registry.** Catalog reads use persisted
   records rather than probing downstream servers.
 - **Discovery protects catalog integrity.** Remote discovery validates the
@@ -92,9 +92,11 @@ that must preserve these invariants.
   deadline expiry are classified in internal logs and reject the invocation
   before any downstream request is made. Schema validation permits local
   references but never retrieves remote schemas.
-- **Migrations are additive.** Alembic history is the durable schema contract;
-  revisions must not be rewritten and should remain backward-compatible where
-  practical.
+- **Migrations are additive by default.** Alembic history is the durable schema
+  contract; revisions must not be rewritten and should remain backward-compatible
+  where practical. Greenfield corrective revisions may rebuild transient session,
+  transaction, and group-mapping tables when removing obsolete authentication
+  storage; `0014` intentionally does so without changing external identities.
 - **Local smoke destinations are narrow exceptions.** The optional Compose
   `smoke-mcp` service is reachable only on the Compose network. Its plain-HTTP
   private address is accepted only when both destination hostname allowlists

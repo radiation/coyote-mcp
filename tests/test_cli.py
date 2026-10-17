@@ -1,5 +1,7 @@
+from sqlalchemy import select
+
 from coyote_mcp import cli
-from coyote_mcp.models import PersonalAccessToken
+from coyote_mcp.models import ExternalIdentity, InstanceAdministrator
 
 
 class SessionContext:
@@ -13,27 +15,23 @@ class SessionContext:
         return None
 
 
-async def test_bootstrap_admin_creates_once_and_never_reprints_token(
+async def test_bootstrap_instance_administrator_creates_binding(
     session, monkeypatch, capsys
 ) -> None:
-    async def issue_bootstrap_pat(
-        database_session, principal, name, scopes, lifetime, settings, *, commit
-    ):
-        assert database_session is session
-        assert principal.identifier == "bootstrap-admin"
-        assert name == "bootstrap"
-        assert scopes == cli.ALL_ACTIONS
-        assert lifetime.total_seconds() == settings.pat_max_lifetime_seconds
-        assert commit is False
-        return PersonalAccessToken(), "coyote_pat_test_secret"
-
     monkeypatch.setattr(cli, "SessionLocal", lambda: SessionContext(session))
-    monkeypatch.setattr(cli, "issue_pat", issue_bootstrap_pat)
 
-    assert await cli.bootstrap_admin() == 0
-    assert "coyote_pat_test_secret" in capsys.readouterr().out
-
-    assert await cli.bootstrap_admin() == 1
+    assert await cli.bootstrap_instance_administrator("https://issuer.example", "subject-123") == 0
     output = capsys.readouterr().out
-    assert "Bootstrap already completed" in output
-    assert "coyote_pat_test_secret" not in output
+    assert "Instance administrator bound" in output
+
+    identity = await session.scalar(
+        select(ExternalIdentity).where(
+            ExternalIdentity.issuer == "https://issuer.example",
+            ExternalIdentity.subject == "subject-123",
+        )
+    )
+    assert identity is not None
+    assert await session.get(InstanceAdministrator, identity.principal_id) is not None
+
+    assert await cli.bootstrap_instance_administrator("https://issuer.example", "subject-123") == 0
+    assert "Instance administrator bound" in capsys.readouterr().out

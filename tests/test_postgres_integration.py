@@ -2,13 +2,16 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 
+import httpx
 import pytest
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from coyote_mcp import catalog
+from coyote_mcp import catalog, oidc
+from coyote_mcp.app import app
 from coyote_mcp.auth import AuthenticatedPrincipal
+from coyote_mcp.db import get_session
 from coyote_mcp.discovery import (
     DiscoveredTool,
     DiscoveryService,
@@ -19,7 +22,9 @@ from coyote_mcp.models import (
     Collection,
     CollectionToolPublication,
     MCPServer,
+    OIDCLoginTransaction,
     Organization,
+    OrganizationMembership,
     Principal,
     RoleAssignment,
     Tool,
@@ -72,12 +77,11 @@ async def publication_current(
     session: AsyncSession, organization: Organization, collection: Collection
 ) -> AuthenticatedPrincipal:
     principal = Principal(
-        organization_id=organization.id,
-        identifier="publication-administrator",
-        display_name="Publication Administrator",
+        identifier="publication-administrator", display_name="Publication Administrator"
     )
     session.add(principal)
     await session.flush()
+    session.add(OrganizationMembership(organization_id=organization.id, principal_id=principal.id))
     session.add(
         RoleAssignment(
             organization_id=organization.id,
@@ -87,7 +91,9 @@ async def publication_current(
         )
     )
     await session.commit()
-    return AuthenticatedPrincipal(principal, frozenset({"collection:update"}), None)
+    return AuthenticatedPrincipal(
+        principal, frozenset({"collection:update"}), None, organization.id
+    )
 
 
 @pytest.mark.asyncio
@@ -96,7 +102,7 @@ async def test_postgres_migration_and_jsonb_persistence(
 ) -> None:
     async with postgres_sessions() as session:
         revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
-        assert revision == "0012"
+        assert revision == "0014"
         organization = Organization(slug="postgres", display_name="PostgreSQL")
         session.add(organization)
         await session.commit()
@@ -118,6 +124,73 @@ async def test_postgres_migration_and_jsonb_persistence(
         )
 
     assert persisted_type == "jsonb"
+
+
+@pytest.mark.asyncio
+async def test_postgres_oidc_login_transaction_uses_environment_provider_without_provider_id(
+    postgres_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("OIDC_ISSUER", "https://issuer.example")
+    monkeypatch.setenv("OIDC_CLIENT_ID", "client")
+    monkeypatch.setenv("OIDC_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("OIDC_REDIRECT_URI", "http://test/auth/oidc/callback")
+
+    async def discovery(_: object) -> dict[str, object]:
+        return {
+            "issuer": "https://issuer.example",
+            "authorization_endpoint": "https://issuer.example/authorize",
+            "token_endpoint": "https://issuer.example/token",
+            "jwks_uri": "https://issuer.example/keys",
+        }
+
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        async with postgres_sessions() as session:
+            yield session
+
+    monkeypatch.setattr(oidc, "_discovery", discovery)
+    app.dependency_overrides[get_session] = override_session
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get("/auth/oidc/login")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 302
+    async with postgres_sessions() as session:
+        transaction = await session.scalar(select(OIDCLoginTransaction))
+        legacy_provider_columns = await session.scalar(
+            text(
+                "SELECT count(*) FROM information_schema.columns "
+                "WHERE table_name IN ('oidc_login_transactions', 'browser_sessions', "
+                "'external_identities') AND column_name IN ('provider_id', 'identity_provider_id')"
+            )
+        )
+        identity_binding_columns = (
+            await session.execute(
+                text(
+                    "SELECT column_name, is_nullable FROM information_schema.columns "
+                    "WHERE table_name = 'external_identities' "
+                    "AND column_name IN ('issuer', 'subject') ORDER BY column_name"
+                )
+            )
+        ).all()
+        issuer_subject_constraints = await session.scalar(
+            text(
+                "SELECT count(*) FROM pg_constraint "
+                "WHERE conname = 'uq_external_identities_issuer_subject'"
+            )
+        )
+
+    assert transaction is not None
+    assert transaction.browser_binding_hash
+    assert transaction.nonce
+    assert transaction.pkce_verifier
+    assert legacy_provider_columns == 0
+    assert identity_binding_columns == [("issuer", "NO"), ("subject", "NO")]
+    assert issuer_subject_constraints == 1
 
 
 @pytest.mark.asyncio

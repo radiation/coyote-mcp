@@ -7,14 +7,13 @@ Catalog entities are organization-scoped. Identities are instance-wide and gain 
 | Organization | Tenant/isolation root; slug is unique and the enabled state gates all membership-based access. |
 | Principal | An enabled global human or service identity; identifier is instance-unique and has no mutable organization context. |
 | OrganizationMembership | Explicit enabled link between one global principal and one enabled organization. Membership alone grants no permission. |
-| InstanceAdministrator | Instance-wide administrator binding for global identity-provider configuration. |
+| InstanceAdministrator | Instance-wide administrator binding for the configured OIDC issuer/subject. |
 | RoleAssignment | Grants a built-in role organization-wide or for one collection. Cross-tenant principal/collection pairs are constrained. |
 | PAT | Belongs to a principal and organization; has a unique token ID, hashed verifier, attenuated scopes, expiry, and revocation state. |
-| IdentityProvider | Instance-wide OIDC provider; issuer/name are instance-unique and exactly one enabled provider is required for login. |
 | ExternalIdentity | Binds a principal globally to `(issuer, subject)`; email is non-authoritative metadata. |
-| ExternalGroup and GroupRoleMapping | A group belongs to an identity provider; mappings grant organization or collection-scoped built-in roles. |
-| BrowserSession | Server-side session for a principal with hashed opaque verifier, CSRF hash, verified provider groups, expiry, activity, revocation, and optional active organization ID. |
-| OIDCLoginTransaction | Short-lived, single-use server-side state/nonce/PKCE record bound to a browser and provider. |
+| ExternalGroup and GroupRoleMapping | A group maps a validated claim value to organization or collection-scoped built-in roles. |
+| BrowserSession | Server-side session for a principal with hashed opaque verifier, CSRF hash, verified group IDs, expiry, activity, revocation, and optional active organization ID. |
+| OIDCLoginTransaction | Short-lived, single-use server-side state/nonce/PKCE record bound to a browser. |
 | MCPServer | Registered downstream server with one organization, endpoint, transport, sync state, and tool generation. |
 | Tool | Persisted advertised tool for one server; schema/annotations are untrusted metadata and active state is reconciliation-managed. |
 | Collection | Organization-scoped capability/discovery grouping with an enabled state and an exposure mode: `discovery` for bound universal tools or `native` for direct persisted-tool publication. |

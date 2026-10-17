@@ -1,13 +1,22 @@
-from uuid import UUID
+from dataclasses import dataclass
+from urllib.parse import urlsplit
 
-from pydantic import AliasChoices, Field, model_validator
+from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEVELOPMENT_SESSION_SECRET = "development-only-change-me"
 
 
-def oidc_client_secret_reference(provider_id: UUID) -> str:
-    return f"env:COYOTE_OIDC_CLIENT_SECRET_{provider_id.hex.upper()}"
+@dataclass(frozen=True)
+class OIDCProviderConfiguration:
+    issuer: str
+    client_id: str
+    client_secret: str
+    redirect_uri: str
+    allowed_organization: str | None
+    group_claim: str | None
+    trusted_endpoint_hosts: tuple[str, ...]
+    jit_provisioning_enabled: bool
 
 
 class Settings(BaseSettings):
@@ -37,6 +46,14 @@ class Settings(BaseSettings):
     oidc_discovery_timeout_seconds: float = 10.0
     allow_insecure_oidc: bool = False
     allow_private_oidc: bool = False
+    oidc_issuer: str | None = None
+    oidc_client_id: str | None = None
+    oidc_client_secret: SecretStr | None = None
+    oidc_redirect_uri: str | None = None
+    oidc_allowed_organization: str | None = None
+    oidc_group_claim: str | None = None
+    oidc_trusted_endpoint_hosts: list[str] = []
+    oidc_jit_provisioning_enabled: bool = False
 
     @model_validator(mode="after")
     def validate_session_secret(self) -> Settings:
@@ -61,3 +78,52 @@ class Settings(BaseSettings):
     @property
     def oidc_binding_cookie_name(self) -> str:
         return "coyote_oidc_binding" if self.is_development else "__Host-coyote_oidc_binding"
+
+    def oidc_provider(self) -> OIDCProviderConfiguration:
+        if any(
+            value is None
+            for value in (
+                self.oidc_issuer,
+                self.oidc_client_id,
+                self.oidc_client_secret,
+                self.oidc_redirect_uri,
+            )
+        ):
+            raise ValueError(
+                "OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, and "
+                "OIDC_REDIRECT_URI are required."
+            )
+        assert self.oidc_issuer is not None
+        assert self.oidc_client_id is not None
+        assert self.oidc_client_secret is not None
+        assert self.oidc_redirect_uri is not None
+        issuer = self.oidc_issuer.rstrip("/")
+        issuer_parts = urlsplit(issuer)
+        redirect_uri = self.oidc_redirect_uri
+        redirect_parts = urlsplit(redirect_uri)
+        if (
+            issuer_parts.scheme not in {"https", "http"}
+            or not issuer_parts.netloc
+            or issuer_parts.query
+            or issuer_parts.fragment
+            or redirect_parts.scheme not in {"https", "http"}
+            or not redirect_parts.netloc
+            or redirect_parts.path != "/auth/oidc/callback"
+            or redirect_parts.query
+            or redirect_parts.fragment
+            or (
+                not self.is_development
+                and (issuer_parts.scheme != "https" or redirect_parts.scheme != "https")
+            )
+        ):
+            raise ValueError("OIDC settings contain an invalid issuer or redirect URI.")
+        return OIDCProviderConfiguration(
+            issuer=issuer,
+            client_id=self.oidc_client_id,
+            client_secret=self.oidc_client_secret.get_secret_value(),
+            redirect_uri=redirect_uri,
+            allowed_organization=self.oidc_allowed_organization,
+            group_claim=self.oidc_group_claim,
+            trusted_endpoint_hosts=tuple(self.oidc_trusted_endpoint_hosts),
+            jit_provisioning_enabled=self.oidc_jit_provisioning_enabled,
+        )

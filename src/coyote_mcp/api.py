@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -13,7 +13,6 @@ from coyote_mcp.auth import (
     AuthenticatedPrincipal,
     authorize,
     effective_permissions,
-    is_instance_administrator,
     issue_pat,
 )
 from coyote_mcp.db import get_session
@@ -29,7 +28,6 @@ from coyote_mcp.models import (
     CollectionMembership,
     ExternalGroup,
     GroupRoleMapping,
-    IdentityProvider,
     OrganizationMembership,
     PersonalAccessToken,
     Principal,
@@ -42,7 +40,6 @@ from coyote_mcp.schemas import (
     CollectionUpdate,
     ExternalGroupCreate,
     GroupRoleMappingCreate,
-    IdentityProviderCreate,
     MembershipCreate,
     MembershipResponse,
     Page,
@@ -60,7 +57,7 @@ from coyote_mcp.schemas import (
     ToolResponse,
 )
 from coyote_mcp.security import UnsafeEndpointError, validate_endpoint
-from coyote_mcp.settings import Settings, oidc_client_secret_reference
+from coyote_mcp.settings import Settings
 
 router = APIRouter(prefix="/api/v1")
 Session = Annotated[AsyncSession, Depends(get_session)]
@@ -102,7 +99,6 @@ async def require(
         resource,
         context,
         current.verified_group_ids,
-        current.identity_provider_id,
     )
     if not decision.allowed:
         raise HTTPException(
@@ -458,15 +454,6 @@ async def require_identity_administrator(
     await require(session, current, "policy:manage")
 
 
-async def require_instance_administrator(
-    session: AsyncSession, current: AuthenticatedPrincipal
-) -> None:
-    if not await is_instance_administrator(session, current.principal):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions."
-        )
-
-
 @router.get("/service-principals", response_model=list[PrincipalResponse])
 async def list_service_principals(session: Session, current: Current) -> list[PrincipalResponse]:
     await require_identity_administrator(session, current)
@@ -494,7 +481,6 @@ async def create_service_principal(
         current.principal,
         current.require_organization_id(),
         current.verified_group_ids,
-        current.identity_provider_id,
     )
     requested_permissions = frozenset().union(*(ROLE_PERMISSIONS[role] for role in request.roles))
     if not requested_permissions.issubset(actor_permissions):
@@ -580,7 +566,6 @@ async def issue_service_pat(
         current.principal,
         current.require_organization_id(),
         current.verified_group_ids,
-        current.identity_provider_id,
     )
     if not request.scopes.issubset(actor_permissions):
         raise HTTPException(status_code=403, detail="Cannot issue broader credentials.")
@@ -620,52 +605,13 @@ async def revoke_service_pat(
     await session.commit()
 
 
-@router.post("/identity-providers", status_code=status.HTTP_201_CREATED)
-async def create_identity_provider(
-    request: IdentityProviderCreate, session: Session, current: Current
-) -> dict[str, str]:
-    await require_instance_administrator(session, current)
-    if request.client_secret_reference != "env:auto":
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="OIDC client secrets must use the operator-managed env:auto binding.",
-        )
-    provider_id = uuid4()
-    provider = IdentityProvider(
-        id=provider_id,
-        name=request.name,
-        issuer=str(request.issuer),
-        client_id=request.client_id,
-        client_secret_reference=oidc_client_secret_reference(provider_id),
-        allowed_organization=request.allowed_organization,
-        group_claim=request.group_claim,
-        trusted_endpoint_hosts=request.trusted_endpoint_hosts,
-        jit_provisioning_enabled=request.jit_provisioning_enabled,
-    )
-    session.add(provider)
-    try:
-        await session.commit()
-    except IntegrityError as error:
-        await session.rollback()
-        raise HTTPException(
-            status_code=409, detail="Identity provider conflicts with existing configuration."
-        ) from error
-    return {"id": str(provider.id)}
-
-
 @router.post("/external-groups", status_code=status.HTTP_201_CREATED)
 async def create_external_group(
     request: ExternalGroupCreate, session: Session, current: Current
 ) -> dict[str, str]:
     await require_identity_administrator(session, current)
-    provider = await session.scalar(
-        select(IdentityProvider).where(IdentityProvider.id == request.identity_provider_id)
-    )
-    if provider is None:
-        raise HTTPException(status_code=404, detail="Resource not found.")
     group = ExternalGroup(
         organization_id=current.require_organization_id(),
-        identity_provider_id=request.identity_provider_id,
         external_id=request.external_id,
         display_name=request.display_name,
     )

@@ -56,7 +56,6 @@ async def _authorized(session: AsyncSession, current: AuthenticatedPrincipal, ac
         action,
         context={"organization_id": current.require_organization_id()},
         verified_group_ids=current.verified_group_ids,
-        identity_provider_id=current.identity_provider_id,
     )
     return decision.allowed
 
@@ -246,7 +245,6 @@ _PLACEHOLDER_PAGES = {
     "publications": ("Publications", "tool:describe"),
     "principals": ("Principals & Roles", "policy:manage"),
     "tokens": ("API Tokens", "credential:create"),
-    "identity-providers": ("Identity Providers", "policy:manage"),
 }
 
 

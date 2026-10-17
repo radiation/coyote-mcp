@@ -13,12 +13,11 @@ header takes precedence over a browser session. Browser sessions are opaque,
 HTTP-only, HTTPS outside development, CSRF-protected for mutation, persisted in
 PostgreSQL, expiring, and revocable.
 
-OIDC uses exactly one enabled instance provider, discovery, PKCE S256, state,
-nonce, token signature/issuer/audience/expiry validation, and a single-use
-transaction bound to an initiating-browser cookie. Invalid zero-provider or
-multi-provider configuration fails closed. Provider client secrets use a
-constrained environment-reference pattern; ID tokens and refresh tokens are not
-persisted. The privileged CLI records a trusted `(issuer, subject)` instance
+OIDC uses exactly one instance provider configured through validated environment
+settings, discovery, PKCE S256, state, nonce, token signature/issuer/audience/
+expiry validation, and a single-use transaction bound to an initiating-browser
+cookie. Missing or invalid settings fail closed. The client secret is injected
+through settings; ID tokens and refresh tokens are not persisted. The privileged CLI records a trusted `(issuer, subject)` instance
 administrator binding; normal browser authentication always validates OIDC
 claims before it issues a session.
 
@@ -31,7 +30,7 @@ enabled organization, and enabled explicit membership at each boundary. Roles
 can be organization-wide or collection-wide.
 PAT scopes further attenuate permissions. External identities use issuer plus
 subject, not email. Groups are taken from validated ID-token claims and evaluated
-only for mappings owned by the authenticating identity provider.
+against organization-scoped mappings.
 
 ## Network safety and limitations
 

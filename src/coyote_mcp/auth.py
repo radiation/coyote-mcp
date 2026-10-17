@@ -72,6 +72,12 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
 }
 
 
+class ExternalIdentityResolutionError(ValueError):
+    def __init__(self, category: str, message: str) -> None:
+        self.category = category
+        super().__init__(message)
+
+
 @dataclass(frozen=True)
 class Decision:
     allowed: bool
@@ -86,7 +92,6 @@ class AuthenticatedPrincipal:
     organization_id: UUID | None
     verified_group_ids: frozenset[str] = frozenset()
     browser_session: BrowserSession | None = None
-    identity_provider_id: UUID | None = None
 
     def require_organization_id(self) -> UUID:
         if self.organization_id is None:
@@ -162,14 +167,12 @@ async def issue_browser_session(
     session: AsyncSession,
     principal: Principal,
     verified_group_ids: list[str],
-    identity_provider_id: UUID,
     settings: Settings,
 ) -> tuple[BrowserSession, str]:
     token_id = secrets.token_hex(12)
     secret = secrets.token_urlsafe(32)
     browser_session = BrowserSession(
         principal_id=principal.id,
-        identity_provider_id=identity_provider_id,
         token_id=token_id,
         token_hash=_hash_secret(secret),
         verified_group_ids=verified_group_ids,
@@ -221,7 +224,6 @@ async def authenticate_browser_session(
         browser_session.active_organization_id,
         frozenset(browser_session.verified_group_ids),
         browser_session,
-        browser_session.identity_provider_id,
     )
 
 
@@ -326,7 +328,6 @@ async def effective_permissions(
     principal: Principal,
     organization_id: UUID,
     verified_group_ids: frozenset[str] = frozenset(),
-    identity_provider_id: UUID | None = None,
 ) -> frozenset[str]:
     roles = set(
         (
@@ -339,7 +340,7 @@ async def effective_permissions(
             )
         ).all()
     )
-    if verified_group_ids and identity_provider_id is not None:
+    if verified_group_ids:
         roles.update(
             (
                 await session.scalars(
@@ -349,7 +350,6 @@ async def effective_permissions(
                         GroupRoleMapping.organization_id == organization_id,
                         GroupRoleMapping.collection_id.is_(None),
                         ExternalGroup.external_id.in_(verified_group_ids),
-                        ExternalGroup.identity_provider_id == identity_provider_id,
                     )
                 )
             ).all()
@@ -363,7 +363,6 @@ async def authorized_collection_ids(
     action: str,
     collections: Sequence[Collection],
     verified_group_ids: frozenset[str] = frozenset(),
-    identity_provider_id: UUID | None = None,
 ) -> frozenset[UUID]:
     if action not in ALL_ACTIONS or not principal.enabled or not collections:
         return frozenset()
@@ -384,7 +383,7 @@ async def authorized_collection_ids(
             )
         ).all()
     )
-    if verified_group_ids and identity_provider_id is not None:
+    if verified_group_ids:
         scopes.extend(
             (
                 await session.execute(
@@ -393,7 +392,6 @@ async def authorized_collection_ids(
                     .where(
                         GroupRoleMapping.organization_id == organization_id,
                         ExternalGroup.external_id.in_(verified_group_ids),
-                        ExternalGroup.identity_provider_id == identity_provider_id,
                     )
                 )
             ).all()
@@ -425,7 +423,9 @@ async def resolve_external_identity(
     )
     if identity is None:
         if not jit_provisioning_enabled:
-            raise ValueError("No external identity is registered for this account.")
+            raise ExternalIdentityResolutionError(
+                "identity_not_registered", "No external identity is registered for this account."
+            )
         principal = Principal(
             identifier=_external_principal_identifier(issuer, subject),
             display_name=display_name or email or subject,
@@ -454,12 +454,19 @@ async def resolve_external_identity(
         else:
             await session.refresh(principal)
     else:
-        principal = identity.principal
+        mapped_principal = await session.get(Principal, identity.principal_id)
+        if mapped_principal is None:
+            raise ExternalIdentityResolutionError(
+                "mapped_principal_missing", "The mapped principal no longer exists."
+            )
+        principal = mapped_principal
         identity.email, identity.display_name = email, display_name
         if display_name:
             principal.display_name = display_name
     if not principal.enabled:
-        raise ValueError("The mapped principal is disabled.")
+        raise ExternalIdentityResolutionError(
+            "mapped_principal_disabled", "The mapped principal is disabled."
+        )
     await session.commit()
     await session.refresh(principal)
     return principal
@@ -476,7 +483,6 @@ async def authorize(
     resource: object | None = None,
     context: dict[str, object] | None = None,
     verified_group_ids: frozenset[str] = frozenset(),
-    identity_provider_id: UUID | None = None,
 ) -> Decision:
     if action not in ALL_ACTIONS:
         return Decision(False, "unknown_action")
@@ -508,7 +514,7 @@ async def authorize(
             )
         ).all()
     )
-    if verified_group_ids and identity_provider_id is not None:
+    if verified_group_ids:
         scopes.extend(
             (
                 await session.execute(
@@ -517,7 +523,6 @@ async def authorize(
                     .where(
                         GroupRoleMapping.organization_id == organization_id,
                         ExternalGroup.external_id.in_(verified_group_ids),
-                        ExternalGroup.identity_provider_id == identity_provider_id,
                     )
                 )
             ).all()

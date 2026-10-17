@@ -5,9 +5,9 @@
 - **Phase 1:** PostgreSQL-backed registration of Streamable HTTP MCP servers,
   generation-safe tool discovery, persisted catalog, and collections.
 - **Phase 2:** Organization-scoped roles and PATs; service principals;
-  enterprise OIDC identities, provider-scoped group mappings, server-side
-  browser sessions, browser-bound OIDC transactions, and provider-bound client
-  secret references.
+  enterprise OIDC identities, organization-scoped group mappings, server-side
+  browser sessions, browser-bound OIDC transactions, and environment-injected
+  client secrets.
 - **Phase 3A:** PAT-authenticated FastMCP Streamable HTTP endpoint with
   universal PostgreSQL-backed search, description, and execution. Every MCP
   operation re-evaluates current authorization; collection-scoped execution is
@@ -46,12 +46,17 @@
   dark styling, and placeholders for future management pages. It has no CRUD
   operations or separate credential path.
 - **Phase 4A.1:** Global principals, explicit enabled organization memberships,
-  server-side active browser-session organization selection, instance-wide OIDC
-  provider configuration, instance administrators, and immutable request
+  server-side active browser-session organization selection, one environment-
+  configured OIDC provider, instance administrators, and immutable request
   organization context are implemented. Migration `0013` is intentionally
   destructive for identity, role, credential, session, and provider data; it
-  preserves organizations and catalog data. Reconfigure OIDC, bind an instance
+  preserves organizations and catalog data. Configure OIDC settings, bind an instance
   administrator, and recreate memberships and roles after applying it.
+- **OIDC schema correction:** Migration `0014` removes legacy database-provider
+  coupling by rebuilding transient browser-session and login-transaction tables
+  plus greenfield group mappings. It preserves global external identities and
+  their `(issuer, subject)` binding while invalidating existing browser sessions,
+  pending OIDC logins, and group-role mappings.
 
 ## Next
 
