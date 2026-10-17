@@ -5,17 +5,18 @@
 | Area | Current responsibility |
 | --- | --- |
 | `app.py` | Builds FastAPI/FastMCP applications, mounts REST/OIDC routes, authenticates PAT-only MCP requests, and serves global plus request-scoped collection MCP endpoints. |
+| `console.py` | Server-rendered `/console` routes. Resolves browser sessions only, persists selection/switching of an active organization server-side with CSRF protection, and reuses centralized authorization for organization-scoped pages. |
 | `api.py` | Authenticated control-plane endpoints for catalog, PATs, service principals, identity providers, groups, and mappings. |
 | `catalog.py` | Organization-scoped server, collection, membership, catalog, and collection tool-publication queries. |
 | `discovery.py` | Streamable HTTP tool discovery, pinned HTTP transport, reconciliation, and generation-safe sync. |
 | `gateway.py` | Publication-gated persisted-catalog MCP search, description, collection endpoint publication, execution-time authorization snapshots, spawned and resource-bounded schema validation, escaped lexical search, bounded downstream invocation, and result sanitization. Global and native endpoints resolve enabled collection publication records for discovery and invocation. |
-| `auth.py` | PAT/browser authentication, session lifecycle, roles, group mappings, centralized authorization, and batched collection-grant evaluation. |
+| `auth.py` | PAT/browser authentication, immutable authenticated organization context, session lifecycle, memberships, roles, group mappings, centralized authorization, and batched collection-grant evaluation. |
 | `oidc.py` | OIDC discovery, PKCE login, browser binding, code exchange, ID-token validation, and logout/CSRF flows. |
 | `security.py` | Destination, public-address, scheme, and OIDC trust-boundary validation. |
 | `models.py` | SQLAlchemy persistence model and tenant-scoped constraints. |
 | `schemas.py` | Pydantic API request/response contracts. |
 | `db.py`, `settings.py` | Async database session factory and configuration/secret-reference rules. |
-| `cli.py` | One-time bootstrap administrator/PAT workflow. |
+| `cli.py` | Operator-only trusted issuer/subject binding for instance-administrator bootstrap and recovery; it never issues a PAT or browser session. |
 | `scripts/mock_mcp_server.py` | Compose-profile-only FastMCP mock exposing deterministic echo, addition, and failure tools. |
 | `scripts/smoke_mcp.py` | Live local smoke runner: temporary tenant bootstrap/cleanup plus REST and authenticated MCP workflow validation. |
 | `alembic/` | Additive schema history through the current identity, session, and provider-secret revisions. |
@@ -32,9 +33,15 @@
    describe, and execute tools. Each operation reloads persisted records and
    re-evaluates centralized authorization before it returns metadata or invokes
    a DNS-pinned registered endpoint.
-4. OIDC login stores a short-lived transaction and browser binding server-side;
-   the callback consumes it atomically, validates the ID token, resolves an
-   `(issuer, subject)` identity, and issues an opaque persisted session.
+4. OIDC login requires exactly one enabled instance provider, stores a
+   short-lived transaction and browser binding server-side, then atomically
+   consumes it, validates the ID token, resolves a global `(issuer, subject)`
+   identity, and issues an opaque persisted session. The console selects the
+   active enabled organization membership with a CSRF-protected POST.
+5. A browser request to `/console` resolves that persisted session, evaluates
+   page permission through `auth.authorize`, then renders Jinja2 HTML. HTMX
+   requests receive only the content fragment; no console route mutates data in
+   Phase 4A.
 
 ## Extension points
 

@@ -1,68 +1,31 @@
 import asyncio
-from datetime import timedelta
 
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
-
-from coyote_mcp.auth import ALL_ACTIONS, issue_pat
+from coyote_mcp.auth import resolve_external_identity
 from coyote_mcp.db import SessionLocal
-from coyote_mcp.models import Organization, Principal, RoleAssignment
-from coyote_mcp.settings import Settings
+from coyote_mcp.models import InstanceAdministrator
 
 
-async def bootstrap_admin() -> int:
-    settings = Settings()
+async def bootstrap_instance_administrator(issuer: str, subject: str) -> int:
+    """Record a trusted OIDC issuer/subject binding as an instance administrator.
+
+    This operator-only recovery command does not validate an OIDC assertion and
+    never emits a browser credential or PAT. Normal browser login validates OIDC
+    claims before issuing a session.
+    """
     async with SessionLocal() as session:
-        organization = await session.scalar(
-            select(Organization).where(Organization.slug == settings.default_organization_slug)
+        principal = await resolve_external_identity(
+            session,
+            issuer=issuer,
+            subject=subject,
+            email=None,
+            display_name=None,
+            jit_provisioning_enabled=True,
         )
-        try:
-            if organization is None:
-                organization = Organization(
-                    slug=settings.default_organization_slug,
-                    display_name=settings.default_organization_display_name,
-                )
-                session.add(organization)
-                await session.flush()
-            owner = await session.scalar(
-                select(Principal).where(
-                    Principal.organization_id == organization.id,
-                    Principal.identifier == "bootstrap-admin",
-                )
-            )
-            if owner is not None:
-                await session.rollback()
-                print("Bootstrap already completed; use the documented recovery procedure.")
-                return 1
-            owner = Principal(
-                organization_id=organization.id,
-                identifier="bootstrap-admin",
-                display_name="Bootstrap Administrator",
-                identity_type="human",
-            )
-            session.add(owner)
-            await session.flush()
-            session.add(
-                RoleAssignment(organization_id=organization.id, principal_id=owner.id, role="owner")
-            )
-            await session.flush()
-            _, plaintext = await issue_pat(
-                session,
-                owner,
-                "bootstrap",
-                set(ALL_ACTIONS),
-                timedelta(seconds=settings.pat_max_lifetime_seconds),
-                settings,
-                commit=False,
-            )
+        if await session.get(InstanceAdministrator, principal.id) is None:
+            session.add(InstanceAdministrator(principal_id=principal.id))
             await session.commit()
-        except IntegrityError:
-            await session.rollback()
-            print("Bootstrap already completed; use the documented recovery procedure.")
-            return 1
-        print("Store this bootstrap PAT now; it will not be displayed again:")
-        print(plaintext)
-        return 0
+        print(f"Instance administrator bound to principal {principal.identifier}.")
+    return 0
 
 
 def main() -> None:
@@ -70,7 +33,10 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(prog="coyote-mcp")
     subcommands = parser.add_subparsers(dest="command", required=True)
-    subcommands.add_parser("bootstrap-admin")
+    for command in ("bootstrap-instance-admin", "recover-instance-admin"):
+        command_parser = subcommands.add_parser(command)
+        command_parser.add_argument("--issuer", required=True)
+        command_parser.add_argument("--subject", required=True)
     args = parser.parse_args()
-    if args.command == "bootstrap-admin":
-        raise SystemExit(asyncio.run(bootstrap_admin()))
+    if args.command in {"bootstrap-instance-admin", "recover-instance-admin"}:
+        raise SystemExit(asyncio.run(bootstrap_instance_administrator(args.issuer, args.subject)))

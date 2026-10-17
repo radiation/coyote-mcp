@@ -106,10 +106,11 @@ that must preserve these invariants.
 - **Credentialed downstream integrations:** The registry has no general
   downstream credential storage or propagation mechanism yet. Any future
   mechanism must preserve the secret and destination protections above.
-- **Console and semantic discovery:** An HTMX console, search/embedding index,
-  auditing, metrics, and richer policy features are future work. They must use
-  the database registry and centralized authorization rather than create a
-  parallel policy path.
+- **Console and semantic discovery:** The read-only HTMX console uses only
+  persisted registry data, server-side browser sessions, and centralized
+  authorization. Its aggregate dashboard queries are organization-scoped. CRUD,
+  semantic discovery, auditing, metrics, and richer policy features remain
+  future work and must not create a parallel policy path.
 - **Fine-grained tool policy:** Publication curation controls discovery and native visibility;
   per-principal tool-specific allow and deny policies are not implemented. Tool
   annotations are untrusted metadata and never imply safety.

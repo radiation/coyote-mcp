@@ -40,6 +40,18 @@
   execution, structured tool failures, tenant isolation, revoked-PAT denial,
   and temporary tenant cleanup. The profile uses hostname-specific private HTTP
   destination allowlists rather than broad SSRF development overrides.
+- **Phase 4A:** A read-only Jinja2/HTMX administration console provides an
+  organization-scoped registry overview, persisted server-health list,
+  browser-session-only authentication, centralized RBAC page checks, responsive
+  dark styling, and placeholders for future management pages. It has no CRUD
+  operations or separate credential path.
+- **Phase 4A.1:** Global principals, explicit enabled organization memberships,
+  server-side active browser-session organization selection, instance-wide OIDC
+  provider configuration, instance administrators, and immutable request
+  organization context are implemented. Migration `0013` is intentionally
+  destructive for identity, role, credential, session, and provider data; it
+  preserves organizations and catalog data. Reconfigure OIDC, bind an instance
+  administrator, and recreate memberships and roles after applying it.
 
 ## Next
 
@@ -47,7 +59,7 @@
   and operational metrics for MCP execution.
 - **Phase 3C:** Per-principal fine-grained tool policy, richer discovery, and
   semantic search without weakening the persisted-catalog boundary.
-- **Later:** An HTMX operator console and semantic/search-based progressive
+- **Later:** Console CRUD workflows and semantic/search-based progressive
   discovery while preserving the database registry and policy model.
 
 ## Open technical decisions

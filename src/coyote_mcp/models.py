@@ -34,6 +34,7 @@ class Organization(Base):
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     slug: Mapped[str] = mapped_column(String(160), unique=True, index=True)
     display_name: Mapped[str] = mapped_column(String(160))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -192,14 +193,9 @@ class CollectionToolPublication(Base):
 
 class Principal(Base):
     __tablename__ = "principals"
-    __table_args__ = (
-        UniqueConstraint("organization_id", "identifier", name="uq_principals_org_identifier"),
-    )
+    __table_args__ = (UniqueConstraint("identifier", name="uq_principals_identifier"),)
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
-    )
     identifier: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(255))
     identity_type: Mapped[str] = mapped_column(String(32), default="human")
@@ -216,6 +212,32 @@ class Principal(Base):
     )
 
 
+class OrganizationMembership(Base):
+    __tablename__ = "organization_memberships"
+    __table_args__ = (
+        UniqueConstraint("principal_id", "organization_id", name="uq_org_membership"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    principal_id: Mapped[UUID] = mapped_column(
+        ForeignKey("principals.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class InstanceAdministrator(Base):
+    __tablename__ = "instance_administrators"
+
+    principal_id: Mapped[UUID] = mapped_column(
+        ForeignKey("principals.id", ondelete="CASCADE"), primary_key=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class RoleAssignment(Base):
     __tablename__ = "role_assignments"
     __table_args__ = (
@@ -225,11 +247,7 @@ class RoleAssignment(Base):
             "collection_id",
             name="uq_role_assignments_principal_role_collection",
         ),
-        ForeignKeyConstraint(
-            ["principal_id", "organization_id"],
-            ["principals.id", "principals.organization_id"],
-            ondelete="CASCADE",
-        ),
+        ForeignKeyConstraint(["principal_id"], ["principals.id"], ondelete="CASCADE"),
         ForeignKeyConstraint(
             ["collection_id", "organization_id"],
             ["collections.id", "collections.organization_id"],
@@ -265,11 +283,7 @@ class PersonalAccessToken(Base):
     __tablename__ = "personal_access_tokens"
     __table_args__ = (
         UniqueConstraint("token_id", name="uq_personal_access_tokens_token_id"),
-        ForeignKeyConstraint(
-            ["principal_id", "organization_id"],
-            ["principals.id", "principals.organization_id"],
-            ondelete="CASCADE",
-        ),
+        ForeignKeyConstraint(["principal_id"], ["principals.id"], ondelete="CASCADE"),
         CheckConstraint("length(token_id) > 0", name="ck_personal_access_tokens_token_id"),
     )
 
@@ -293,20 +307,15 @@ class PersonalAccessToken(Base):
 
 class BrowserSession(Base):
     __tablename__ = "browser_sessions"
-    __table_args__ = (
-        UniqueConstraint("token_id", name="uq_browser_sessions_token_id"),
-        ForeignKeyConstraint(
-            ["principal_id", "organization_id"],
-            ["principals.id", "principals.organization_id"],
-            ondelete="CASCADE",
-        ),
-    )
+    __table_args__ = (UniqueConstraint("token_id", name="uq_browser_sessions_token_id"),)
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    principal_id: Mapped[UUID] = mapped_column(
+        ForeignKey("principals.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    principal_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False, index=True)
+    active_organization_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("organizations.id", ondelete="SET NULL"), index=True
+    )
     identity_provider_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), index=True)
     token_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     token_hash: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -324,20 +333,12 @@ class BrowserSession(Base):
 
 class OIDCLoginTransaction(Base):
     __tablename__ = "oidc_login_transactions"
-    __table_args__ = (
-        UniqueConstraint("state_hash", name="uq_oidc_login_transactions_state_hash"),
-        ForeignKeyConstraint(
-            ["provider_id", "organization_id"],
-            ["identity_providers.id", "identity_providers.organization_id"],
-            ondelete="CASCADE",
-        ),
-    )
+    __table_args__ = (UniqueConstraint("state_hash", name="uq_oidc_login_transactions_state_hash"),)
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    provider_id: Mapped[UUID] = mapped_column(
+        ForeignKey("identity_providers.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    provider_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False, index=True)
     state_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     browser_binding_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     nonce: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -352,12 +353,11 @@ class OIDCLoginTransaction(Base):
 class IdentityProvider(Base):
     __tablename__ = "identity_providers"
     __table_args__ = (
-        UniqueConstraint("organization_id", "name", name="uq_identity_providers_org_name"),
-        UniqueConstraint("organization_id", "issuer", name="uq_identity_providers_org_issuer"),
-        UniqueConstraint("id", "organization_id", name="uq_identity_providers_id_organization_id"),
+        UniqueConstraint("name", name="uq_identity_providers_name"),
+        UniqueConstraint("issuer", name="uq_identity_providers_issuer"),
         Index(
-            "uq_identity_providers_one_active_org",
-            "organization_id",
+            "uq_identity_providers_one_active",
+            "enabled",
             unique=True,
             postgresql_where=text("enabled"),
             sqlite_where=text("enabled"),
@@ -365,9 +365,6 @@ class IdentityProvider(Base):
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
-    )
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     issuer: Mapped[str] = mapped_column(String(2048), nullable=False)
     client_id: Mapped[str] = mapped_column(String(512), nullable=False)
@@ -386,21 +383,13 @@ class IdentityProvider(Base):
 class ExternalIdentity(Base):
     __tablename__ = "external_identities"
     __table_args__ = (
-        UniqueConstraint(
-            "organization_id", "issuer", "subject", name="uq_external_identities_org_issuer_subject"
-        ),
-        ForeignKeyConstraint(
-            ["principal_id", "organization_id"],
-            ["principals.id", "principals.organization_id"],
-            ondelete="CASCADE",
-        ),
+        UniqueConstraint("issuer", "subject", name="uq_external_identities_issuer_subject"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    principal_id: Mapped[UUID] = mapped_column(
+        ForeignKey("principals.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    principal_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False, index=True)
     issuer: Mapped[str] = mapped_column(String(2048), nullable=False)
     subject: Mapped[str] = mapped_column(String(1024), nullable=False)
     email: Mapped[str | None] = mapped_column(String(320))
@@ -419,16 +408,8 @@ class ExternalGroup(Base):
             name="uq_external_groups_org_provider_external_id",
         ),
         UniqueConstraint("id", "organization_id", name="uq_external_groups_id_organization_id"),
-        UniqueConstraint(
-            "id",
-            "organization_id",
-            "identity_provider_id",
-            name="uq_external_groups_id_org_provider",
-        ),
         ForeignKeyConstraint(
-            ["identity_provider_id", "organization_id"],
-            ["identity_providers.id", "identity_providers.organization_id"],
-            ondelete="CASCADE",
+            ["identity_provider_id"], ["identity_providers.id"], ondelete="CASCADE"
         ),
     )
 

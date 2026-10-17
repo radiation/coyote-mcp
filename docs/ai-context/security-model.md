@@ -13,15 +13,22 @@ header takes precedence over a browser session. Browser sessions are opaque,
 HTTP-only, HTTPS outside development, CSRF-protected for mutation, persisted in
 PostgreSQL, expiring, and revocable.
 
-OIDC uses discovery, PKCE S256, state, nonce, token signature/issuer/audience/
-expiry validation, and a single-use transaction bound to an initiating-browser
-cookie. Provider client secrets use a constrained environment-reference pattern;
-ID tokens and refresh tokens are not persisted.
+OIDC uses exactly one enabled instance provider, discovery, PKCE S256, state,
+nonce, token signature/issuer/audience/expiry validation, and a single-use
+transaction bound to an initiating-browser cookie. Invalid zero-provider or
+multi-provider configuration fails closed. Provider client secrets use a
+constrained environment-reference pattern; ID tokens and refresh tokens are not
+persisted. The privileged CLI records a trusted `(issuer, subject)` instance
+administrator binding; normal browser authentication always validates OIDC
+claims before it issues a session.
 
 ## Authorization and tenancy
 
-Authorization is centralized in `auth.authorize`, default-deny, and scoped to
-the principal's organization. Roles can be organization-wide or collection-wide.
+Authorization is centralized in `auth.authorize`, default-deny, and scoped to an
+immutable organization context carried by the authenticated request, never by
+the global `Principal` ORM object. Authorization rechecks enabled principal,
+enabled organization, and enabled explicit membership at each boundary. Roles
+can be organization-wide or collection-wide.
 PAT scopes further attenuate permissions. External identities use issuer plus
 subject, not email. Groups are taken from validated ID-token claims and evaluated
 only for mappings owned by the authenticating identity provider.

@@ -6,6 +6,7 @@ from uuid import UUID
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools.base import Tool, ToolResult
@@ -16,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coyote_mcp.api import router as api_router
 from coyote_mcp.auth import AuthenticatedPrincipal, authenticate_token
+from coyote_mcp.console import router as console_router
 from coyote_mcp.db import SessionLocal
 from coyote_mcp.gateway import GatewayError, GatewayService, NativeGatewayTool
 from coyote_mcp.oidc import router as oidc_router
@@ -211,6 +213,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="coyote-mcp", lifespan=lifespan)
 settings = Settings()
 app.state.mcp_session_factory = SessionLocal
+app.mount("/static", StaticFiles(directory="src/coyote_mcp/static"), name="static")
 
 
 @app.middleware("http")
@@ -246,6 +249,7 @@ app.mount("/mcp/collections", collection_mcp_app)
 app.mount("/mcp", mcp_app)
 app.include_router(api_router)
 app.include_router(oidc_router)
+app.include_router(console_router)
 
 
 @app.get("/", include_in_schema=False)

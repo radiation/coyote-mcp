@@ -6,8 +6,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 DEVELOPMENT_SESSION_SECRET = "development-only-change-me"
 
 
-def oidc_client_secret_reference(organization_id: UUID, provider_id: UUID) -> str:
-    return f"env:COYOTE_OIDC_CLIENT_SECRET_{organization_id.hex.upper()}_{provider_id.hex.upper()}"
+def oidc_client_secret_reference(provider_id: UUID) -> str:
+    return f"env:COYOTE_OIDC_CLIENT_SECRET_{provider_id.hex.upper()}"
 
 
 class Settings(BaseSettings):

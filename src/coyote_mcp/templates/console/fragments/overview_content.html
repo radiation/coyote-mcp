@@ -1,0 +1,16 @@
+{% import "console/components.html" as components %}
+{{ components.page_header('Overview', 'Organization-scoped registry status') }}
+<section class="metric-grid" aria-label="Registry metrics">
+  <article class="metric"><span>Registered MCP servers</span><strong>{{ metrics.servers }}</strong><small>{{ metrics.ready_servers }} ready · {{ metrics.unavailable_servers }} unavailable</small></article>
+  <article class="metric"><span>Cataloged active tools</span><strong>{{ metrics.active_tools }}</strong><small>Across all registered servers</small></article>
+  <article class="metric"><span>Collections</span><strong>{{ metrics.collections }}</strong><small>Enabled and disabled groups included</small></article>
+  <article class="metric"><span>Enabled publications</span><strong>{{ metrics.enabled_publications }}</strong><small>Explicitly published tool records</small></article>
+</section>
+<section class="section-block" aria-labelledby="server-health-title">
+  <div class="section-heading"><h2 id="server-health-title">Server health</h2></div>
+  {% if recent_servers %}
+  <div class="table-wrap"><table><thead><tr><th scope="col">Server</th><th scope="col">Status</th><th scope="col">Last synchronized</th></tr></thead><tbody>
+    {% for server in recent_servers %}<tr><td><strong>{{ server.display_name }}</strong><small>{{ server.name }}</small></td><td>{{ components.status_badge(server.status) }}</td><td>{% if server.last_synced_at %}{{ server.last_synced_at.strftime('%Y-%m-%d %H:%M UTC') }}{% else %}Not synchronized{% endif %}</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% else %}{{ components.empty_state('No registered servers', 'Register an MCP server to begin building the catalog.') }}{% endif %}
+</section>

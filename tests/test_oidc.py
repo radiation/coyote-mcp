@@ -18,6 +18,7 @@ from coyote_mcp.models import (
     BrowserSession,
     IdentityProvider,
     Organization,
+    OrganizationMembership,
     Principal,
     RoleAssignment,
 )
@@ -35,29 +36,34 @@ async def test_oidc_authorization_code_flow_provisions_unprivileged_user(
         provider_id = uuid4()
         provider = IdentityProvider(
             id=provider_id,
-            organization_id=organization.id,
             name="Test",
             issuer="https://issuer.example",
             client_id="client",
-            client_secret_reference=oidc_client_secret_reference(organization.id, provider_id),
+            client_secret_reference=oidc_client_secret_reference(provider_id),
             group_claim="groups",
             jit_provisioning_enabled=True,
         )
         session.add(provider)
         owner = Principal(
-            organization_id=organization.id,
             identifier="owner",
             display_name="Owner",
             enabled=True,
         )
         session.add(owner)
         await session.flush()
+        session.add(OrganizationMembership(organization_id=organization.id, principal_id=owner.id))
         session.add(
             RoleAssignment(organization_id=organization.id, principal_id=owner.id, role="owner")
         )
         await session.commit()
         _, owner_token = await issue_pat(
-            session, owner, "owner", set(ALL_ACTIONS), timedelta(days=1), Settings()
+            session,
+            owner,
+            organization.id,
+            "owner",
+            set(ALL_ACTIONS),
+            timedelta(days=1),
+            Settings(),
         )
 
     async def discovery(_: IdentityProvider) -> dict[str, object]:
@@ -94,7 +100,7 @@ async def test_oidc_authorization_code_flow_provisions_unprivileged_user(
             yield session
 
     monkeypatch.setenv(
-        oidc_client_secret_reference(organization.id, provider_id).removeprefix("env:"),
+        oidc_client_secret_reference(provider_id).removeprefix("env:"),
         "secret",
     )
     monkeypatch.setattr(oidc, "_discovery", discovery)
@@ -106,11 +112,11 @@ async def test_oidc_authorization_code_flow_provisions_unprivileged_user(
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
-            login = await client.get("/auth/oidc/sso/login")
+            login = await client.get("/auth/oidc/login")
             assert login.status_code == 302, login.text
             authorization_query = parse_qs(urlparse(login.headers["location"]).query)
             state = authorization_query["state"][0]
-            concurrent_login = await client.get("/auth/oidc/sso/login")
+            concurrent_login = await client.get("/auth/oidc/login")
             replacement_state = parse_qs(urlparse(concurrent_login.headers["location"]).query)[
                 "state"
             ][0]
@@ -191,7 +197,6 @@ async def test_id_token_validation_checks_discovery_signature_and_claims(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = IdentityProvider(
-        organization_id=Organization(slug="oidc", display_name="OIDC").id,
         name="Test",
         issuer="https://issuer.example",
         client_id="client",
@@ -262,10 +267,8 @@ async def test_id_token_validation_checks_discovery_signature_and_claims(
 
 def test_oidc_secret_reference_and_pkce() -> None:
     assert oidc._pkce_challenge("verifier") != "verifier"
-    organization_id = uuid4()
     provider = IdentityProvider(
         id=uuid4(),
-        organization_id=organization_id,
         name="Binding",
         issuer="https://issuer.example",
         client_id="client",
@@ -279,7 +282,6 @@ def test_oidc_secret_reference_and_pkce() -> None:
 async def test_oidc_discovery_and_token_exchange_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     requested_urls: list[str] = []
     provider = IdentityProvider(
-        organization_id=Organization(slug="helpers", display_name="Helpers").id,
         name="Test",
         issuer="https://issuer.example/",
         client_id="client",

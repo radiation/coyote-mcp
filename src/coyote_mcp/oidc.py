@@ -26,7 +26,7 @@ from coyote_mcp.auth import (
 )
 from coyote_mcp.db import get_session
 from coyote_mcp.discovery import PinnedDestinationTransport
-from coyote_mcp.models import IdentityProvider, OIDCLoginTransaction, Organization
+from coyote_mcp.models import IdentityProvider, OIDCLoginTransaction
 from coyote_mcp.security import UntrustedOIDCEndpointError, validate_oidc_endpoint
 from coyote_mcp.settings import Settings, oidc_client_secret_reference
 
@@ -73,7 +73,7 @@ def _delete_oidc_binding_cookie(response: Response, state: str) -> None:
 
 
 def _secret(provider: IdentityProvider) -> str:
-    expected_reference = oidc_client_secret_reference(provider.organization_id, provider.id)
+    expected_reference = oidc_client_secret_reference(provider.id)
     if provider.client_secret_reference != expected_reference:
         raise ValueError("OIDC client secret binding is not approved.")
     value = os.environ.get(expected_reference.removeprefix("env:"))
@@ -195,18 +195,21 @@ async def validate_id_token(
     return payload
 
 
-@router.get("/{organization_slug}/login")
-async def login(organization_slug: str, request: Request, session: Session) -> RedirectResponse:
-    provider = await session.scalar(
-        select(IdentityProvider)
-        .join(Organization, IdentityProvider.organization_id == Organization.id)
-        .where(
-            IdentityProvider.enabled.is_(True),
-            Organization.slug == organization_slug,
-        )
+@router.get("/login")
+async def login(request: Request, session: Session) -> RedirectResponse:
+    providers = list(
+        (
+            await session.scalars(
+                select(IdentityProvider).where(IdentityProvider.enabled.is_(True)).limit(2)
+            )
+        ).all()
     )
-    if provider is None:
-        raise HTTPException(status_code=404, detail="No enabled identity provider was found.")
+    if len(providers) != 1:
+        raise HTTPException(
+            status_code=503,
+            detail="OIDC instance configuration must contain exactly one enabled provider.",
+        )
+    provider = providers[0]
     try:
         discovery = await _discovery(provider)
     except (httpx.HTTPError, UntrustedOIDCEndpointError, ValueError) as error:
@@ -221,7 +224,6 @@ async def login(organization_slug: str, request: Request, session: Session) -> R
     verifier = secrets.token_urlsafe(64)
     browser_binding = secrets.token_urlsafe(32)
     transaction = OIDCLoginTransaction(
-        organization_id=provider.organization_id,
         provider_id=provider.id,
         state_hash=_hash_secret(state),
         browser_binding_hash=_hash_secret(browser_binding),
@@ -269,7 +271,6 @@ async def callback(request: Request, code: str, state: str, session: Session) ->
         .values(consumed_at=now)
         .returning(
             OIDCLoginTransaction.provider_id,
-            OIDCLoginTransaction.organization_id,
             OIDCLoginTransaction.nonce,
             OIDCLoginTransaction.pkce_verifier,
         )
@@ -278,12 +279,10 @@ async def callback(request: Request, code: str, state: str, session: Session) ->
     await session.commit()
     if transaction is None:
         raise HTTPException(status_code=400, detail="OIDC state validation failed.")
-    provider_id, organization_id, nonce, pkce_verifier = transaction
+    provider_id, nonce, pkce_verifier = transaction
     provider = await session.get(IdentityProvider, provider_id)
     if provider is None or not provider.enabled:
         raise HTTPException(status_code=403, detail="Identity provider is disabled.")
-    if provider.organization_id != organization_id:
-        raise HTTPException(status_code=400, detail="OIDC state validation failed.")
     try:
         discovery = await _discovery(provider)
     except (httpx.HTTPError, UntrustedOIDCEndpointError, ValueError) as error:
@@ -350,7 +349,6 @@ async def callback(request: Request, code: str, state: str, session: Session) ->
             incomplete = True
         principal = await resolve_external_identity(
             session,
-            organization_id=provider.organization_id,
             issuer=provider.issuer,
             subject=claims["sub"],
             email=claims.get("email") if isinstance(claims.get("email"), str) else None,
@@ -365,10 +363,11 @@ async def callback(request: Request, code: str, state: str, session: Session) ->
     if existing_session is not None and existing_session.browser_session is not None:
         existing_session.browser_session.revoked_at = datetime.now(UTC)
         await session.commit()
-    _, session_token = await issue_browser_session(
+    browser_session, session_token = await issue_browser_session(
         session, principal, [] if incomplete else groups_value, provider.id, Settings()
     )
-    response = RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
+    await rotate_csrf_token(session, browser_session)
+    response = RedirectResponse("/console", status_code=status.HTTP_303_SEE_OTHER)
     _set_browser_session_cookie(response, session_token)
     _delete_oidc_binding_cookie(response, state)
     return response

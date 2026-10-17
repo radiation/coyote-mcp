@@ -300,6 +300,28 @@ The installed FastMCP transport does not provide a safe per-principal
 `tools/list_changed` broadcaster, so clients refresh `tools/list` to observe
 catalog, membership, availability, and exposure changes.
 
+## Phase 4A administration console
+
+`/console` is a read-only, server-rendered administration console. It uses the
+existing server-side browser session and centralized RBAC evaluation; it does
+not accept PAT bearer credentials and has no separate login mechanism. An
+unauthenticated request redirects to `/console/login`, which forwards a supplied
+organization slug to the existing `/auth/oidc/{organization}/login` flow.
+
+The overview requires both `server:read` and `collection:read`, and returns
+organization-scoped aggregate counts for registered and ready servers, active
+catalog tools, collections, and enabled publications. It also shows recent
+server health from persisted registry data. The other console destinations
+(`servers`, `collections`, `tools`, `publications`, `principals`, `tokens`, and
+`identity-providers`) are RBAC-protected placeholders for later CRUD phases.
+
+Console pages are complete HTML responses by default. Requests with the HTMX
+`HX-Request: true` header receive only the main-content fragment, so future
+table and form interactions can update `#console-content` without replacing the
+shell. HTMX is loaded from the version-pinned
+`https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js` URL; update the explicit
+version deliberately when upgrading it. There is no Node build pipeline.
+
 ## Local end-to-end smoke test
 
 The optional `smoke` Compose profile starts an internal FastMCP server with
@@ -413,7 +435,8 @@ CI status check as required (and optionally require the branch to be up to date)
 
 - Tool execution routing
 - Search, embedding index, and collection filtering
-- HTMX dashboard (Jinja2 is provisioned only)
+- Console CRUD workflows for servers, collections, publications, principals,
+  tokens, and identity providers
 - Metrics, audits, and production hardening
 
 Discovery currently supports Streamable HTTP only. Catalog results come from the

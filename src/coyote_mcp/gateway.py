@@ -246,7 +246,7 @@ class GatewayService:
         current = await self._refresh_current(session, current)
         collection = await session.scalar(
             select(Collection).where(
-                Collection.organization_id == current.principal.organization_id,
+                Collection.organization_id == current.require_organization_id(),
                 Collection.slug == collection_slug,
                 Collection.enabled.is_(True),
             )
@@ -401,7 +401,7 @@ class GatewayService:
         collection_slug: str | None,
     ) -> list[Collection]:
         statement = select(Collection).where(
-            Collection.organization_id == current.principal.organization_id,
+            Collection.organization_id == current.require_organization_id(),
             Collection.enabled.is_(True),
         )
         if collection_slug is not None:
@@ -491,7 +491,7 @@ class GatewayService:
             .join(MCPServer, Tool.server_id == MCPServer.id)
             .where(
                 Tool.id == tool_id,
-                MCPServer.organization_id == current.principal.organization_id,
+                MCPServer.organization_id == current.require_organization_id(),
                 Tool.active.is_(True),
                 MCPServer.status == "ready",
                 MCPServer.transport == "streamable_http",
@@ -573,7 +573,6 @@ class GatewayService:
         principal = await session.scalar(
             select(Principal).where(
                 Principal.id == current.principal.id,
-                Principal.organization_id == current.principal.organization_id,
                 Principal.enabled.is_(True),
             )
         )
@@ -584,7 +583,7 @@ class GatewayService:
                 select(PersonalAccessToken).where(
                     PersonalAccessToken.id == current.token.id,
                     PersonalAccessToken.principal_id == principal.id,
-                    PersonalAccessToken.organization_id == principal.organization_id,
+                    PersonalAccessToken.organization_id == current.require_organization_id(),
                     PersonalAccessToken.revoked_at.is_(None),
                     PersonalAccessToken.expires_at > datetime.now(UTC),
                 )
