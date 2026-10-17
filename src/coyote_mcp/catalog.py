@@ -145,6 +145,7 @@ async def require_collection_update(
         "collection:update",
         collection,
         verified_group_ids=current.verified_group_ids,
+        credential_context=current.credential_context,
     )
     if not decision.allowed:
         raise AuthorizationError("Insufficient permissions.")

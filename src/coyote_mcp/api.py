@@ -99,6 +99,7 @@ async def require(
         resource,
         context,
         current.verified_group_ids,
+        current.credential_context,
     )
     if not decision.allowed:
         raise HTTPException(
@@ -209,7 +210,15 @@ async def list_collections(
     )
     visible: list[CollectionResponse] = []
     for collection in collections:
-        if (await authorize(session, current.principal, "collection:read", collection)).allowed:
+        if (
+            await authorize(
+                session,
+                current.principal,
+                "collection:read",
+                collection,
+                credential_context=current.credential_context,
+            )
+        ).allowed:
             visible.append(CollectionResponse.model_validate(collection))
     return visible
 
@@ -481,6 +490,7 @@ async def create_service_principal(
         current.principal,
         current.require_organization_id(),
         current.verified_group_ids,
+        current.credential_context,
     )
     requested_permissions = frozenset().union(*(ROLE_PERMISSIONS[role] for role in request.roles))
     if not requested_permissions.issubset(actor_permissions):
@@ -566,6 +576,7 @@ async def issue_service_pat(
         current.principal,
         current.require_organization_id(),
         current.verified_group_ids,
+        current.credential_context,
     )
     if not request.scopes.issubset(actor_permissions):
         raise HTTPException(status_code=403, detail="Cannot issue broader credentials.")

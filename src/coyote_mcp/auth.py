@@ -6,6 +6,7 @@ import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import select
@@ -70,9 +71,16 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     ),
     "viewer": frozenset({"server:read", "collection:read", "tool:discover", "tool:describe"}),
 }
+CredentialContext = Literal["browser_session", "pat"]
 
 
 class ExternalIdentityResolutionError(ValueError):
+    def __init__(self, category: str, message: str) -> None:
+        self.category = category
+        super().__init__(message)
+
+
+class OrganizationBootstrapError(ValueError):
     def __init__(self, category: str, message: str) -> None:
         self.category = category
         super().__init__(message)
@@ -92,6 +100,7 @@ class AuthenticatedPrincipal:
     organization_id: UUID | None
     verified_group_ids: frozenset[str] = frozenset()
     browser_session: BrowserSession | None = None
+    credential_context: CredentialContext = "browser_session"
 
     def require_organization_id(self) -> UUID:
         if self.organization_id is None:
@@ -130,6 +139,18 @@ async def _enabled_membership(
     )
 
 
+async def _enabled_organization(session: AsyncSession, organization_id: UUID) -> bool:
+    return (
+        await session.scalar(
+            select(Organization.id).where(
+                Organization.id == organization_id,
+                Organization.enabled.is_(True),
+            )
+        )
+        is not None
+    )
+
+
 async def authenticate_token(session: AsyncSession, value: str) -> AuthenticatedPrincipal | None:
     parts = _token_parts(value, "coyote_pat_")
     if parts is None:
@@ -160,7 +181,13 @@ async def authenticate_token(session: AsyncSession, value: str) -> Authenticated
         return None
     token.last_used_at = datetime.now(UTC)
     await session.commit()
-    return AuthenticatedPrincipal(principal, frozenset(token.scopes), token, token.organization_id)
+    return AuthenticatedPrincipal(
+        principal,
+        frozenset(token.scopes),
+        token,
+        token.organization_id,
+        credential_context="pat",
+    )
 
 
 async def issue_browser_session(
@@ -224,6 +251,7 @@ async def authenticate_browser_session(
         browser_session.active_organization_id,
         frozenset(browser_session.verified_group_ids),
         browser_session,
+        "browser_session",
     )
 
 
@@ -243,20 +271,25 @@ def csrf_token_valid(browser_session: BrowserSession, token: str | None) -> bool
 
 
 async def available_organizations(
-    session: AsyncSession, principal: Principal
+    session: AsyncSession, current: AuthenticatedPrincipal
 ) -> list[Organization]:
+    if current.credential_context == "browser_session" and await is_instance_administrator(
+        session, current.principal
+    ):
+        statement = select(Organization).where(Organization.enabled.is_(True))
+    else:
+        statement = (
+            select(Organization)
+            .join(OrganizationMembership)
+            .where(
+                OrganizationMembership.principal_id == current.principal.id,
+                OrganizationMembership.enabled.is_(True),
+                Organization.enabled.is_(True),
+            )
+        )
     return list(
         (
-            await session.scalars(
-                select(Organization)
-                .join(OrganizationMembership)
-                .where(
-                    OrganizationMembership.principal_id == principal.id,
-                    OrganizationMembership.enabled.is_(True),
-                    Organization.enabled.is_(True),
-                )
-                .order_by(Organization.display_name, Organization.slug)
-            )
+            await session.scalars(statement.order_by(Organization.display_name, Organization.slug))
         ).all()
     )
 
@@ -264,9 +297,17 @@ async def available_organizations(
 async def select_active_organization(
     session: AsyncSession, current: AuthenticatedPrincipal, organization_id: UUID
 ) -> bool:
-    if current.browser_session is None or not current.principal.enabled:
+    if (
+        current.credential_context != "browser_session"
+        or current.browser_session is None
+        or not current.principal.enabled
+    ):
         return False
-    if await _enabled_membership(session, current.principal.id, organization_id) is None:
+    if not await _enabled_organization(session, organization_id):
+        return False
+    if not await is_instance_administrator(session, current.principal) and (
+        await _enabled_membership(session, current.principal.id, organization_id) is None
+    ):
         return False
     current.browser_session.active_organization_id = organization_id
     await session.commit()
@@ -328,7 +369,12 @@ async def effective_permissions(
     principal: Principal,
     organization_id: UUID,
     verified_group_ids: frozenset[str] = frozenset(),
+    credential_context: CredentialContext = "browser_session",
 ) -> frozenset[str]:
+    if credential_context == "browser_session" and await is_instance_administrator(
+        session, principal
+    ):
+        return ALL_ACTIONS
     roles = set(
         (
             await session.scalars(
@@ -476,6 +522,53 @@ async def is_instance_administrator(session: AsyncSession, principal: Principal)
     return principal.enabled and await session.get(InstanceAdministrator, principal.id) is not None
 
 
+async def create_initial_organization(
+    session: AsyncSession,
+    current: AuthenticatedPrincipal,
+    *,
+    slug: str,
+    display_name: str,
+) -> Organization:
+    if (
+        current.credential_context != "browser_session"
+        or current.browser_session is None
+        or not await is_instance_administrator(session, current.principal)
+    ):
+        raise OrganizationBootstrapError(
+            "instance_administrator_required",
+            "An enabled instance administrator is required to create the first organization.",
+        )
+    organization = Organization(slug=slug, display_name=display_name)
+    session.add(organization)
+    try:
+        await session.flush()
+        session.add(
+            OrganizationMembership(
+                organization_id=organization.id,
+                principal_id=current.principal.id,
+                enabled=True,
+            )
+        )
+        session.add(
+            RoleAssignment(
+                organization_id=organization.id,
+                principal_id=current.principal.id,
+                role="owner",
+            )
+        )
+        current.browser_session.active_organization_id = organization.id
+        await session.commit()
+    except IntegrityError as error:
+        await session.rollback()
+        await session.refresh(current.principal)
+        await session.refresh(current.browser_session)
+        raise OrganizationBootstrapError(
+            "duplicate_slug", "An organization with this slug already exists."
+        ) from error
+    await session.refresh(organization)
+    return organization
+
+
 async def authorize(
     session: AsyncSession,
     principal: Principal,
@@ -483,6 +576,7 @@ async def authorize(
     resource: object | None = None,
     context: dict[str, object] | None = None,
     verified_group_ids: frozenset[str] = frozenset(),
+    credential_context: CredentialContext = "browser_session",
 ) -> Decision:
     if action not in ALL_ACTIONS:
         return Decision(False, "unknown_action")
@@ -502,6 +596,12 @@ async def authorize(
             collection_id = resource.id
         if not isinstance(organization_id, UUID):
             return Decision(False, "missing_resource_context")
+    if not await _enabled_organization(session, organization_id):
+        return Decision(False, "organization_disabled")
+    if credential_context == "browser_session" and await is_instance_administrator(
+        session, principal
+    ):
+        return Decision(True, "instance_administrator")
     if await _enabled_membership(session, principal.id, organization_id) is None:
         return Decision(False, "missing_membership")
     scopes = list(

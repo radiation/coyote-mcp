@@ -40,11 +40,12 @@
   execution, structured tool failures, tenant isolation, revoked-PAT denial,
   and temporary tenant cleanup. The profile uses hostname-specific private HTTP
   destination allowlists rather than broad SSRF development overrides.
-- **Phase 4A:** A read-only Jinja2/HTMX administration console provides an
+- **Phase 4A:** A Jinja2/HTMX administration console provides an
   organization-scoped registry overview, persisted server-health list,
   browser-session-only authentication, centralized RBAC page checks, responsive
-  dark styling, and placeholders for future management pages. It has no CRUD
-  operations or separate credential path.
+  dark styling, and placeholders for future management pages. Its only current
+  mutation is instance-admin organization creation; it has no separate
+  credential path.
 - **Phase 4A.1:** Global principals, explicit enabled organization memberships,
   server-side active browser-session organization selection, one environment-
   configured OIDC provider, instance administrators, and immutable request
@@ -57,6 +58,16 @@
   plus greenfield group mappings. It preserves global external identities and
   their `(issuer, subject)` binding while invalidating existing browser sessions,
   pending OIDC logins, and group-role mappings.
+- **Organization bootstrap correction:** Migration `0015` removes the untouched
+  legacy `default` seed, while preserving a default department with dependent
+  data. Fresh deployments therefore begin without departments until an instance
+  administrator creates one.
+- **Phase 4A instance administration:** Enabled instance administrators are
+  browser-session superusers for every enabled organization and can recover
+  ownerless departments without synthetic memberships or owner roles. They can
+  select any department and create new ones; creation atomically grants the new
+  department's owner membership and role. PATs remain single-department and MCP
+  discovery/execution remains membership- and publication-gated.
 
 ## Next
 

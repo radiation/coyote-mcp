@@ -5,12 +5,12 @@
 | Area | Current responsibility |
 | --- | --- |
 | `app.py` | Builds FastAPI/FastMCP applications, mounts REST/OIDC routes, authenticates PAT-only MCP requests, and serves global plus request-scoped collection MCP endpoints. |
-| `console.py` | Server-rendered `/console` routes. Resolves browser sessions only, persists selection/switching of an active organization server-side with CSRF protection, and reuses centralized authorization for organization-scoped pages. |
+| `console.py` | Server-rendered `/console` routes. Resolves browser sessions only, persists selection/switching of an active organization server-side with CSRF protection, and reuses centralized authorization for organization-scoped pages. Instance administrators can select any enabled organization and create departments. |
 | `api.py` | Authenticated control-plane endpoints for catalog, PATs, service principals, groups, and mappings. |
 | `catalog.py` | Organization-scoped server, collection, membership, catalog, and collection tool-publication queries. |
 | `discovery.py` | Streamable HTTP tool discovery, pinned HTTP transport, reconciliation, and generation-safe sync. |
 | `gateway.py` | Publication-gated persisted-catalog MCP search, description, collection endpoint publication, execution-time authorization snapshots, spawned and resource-bounded schema validation, escaped lexical search, bounded downstream invocation, and result sanitization. Global and native endpoints resolve enabled collection publication records for discovery and invocation. |
-| `auth.py` | PAT/browser authentication, immutable authenticated organization context, session lifecycle, memberships, roles, group mappings, centralized authorization, and batched collection-grant evaluation. |
+| `auth.py` | PAT/browser authentication, immutable authenticated organization context, session lifecycle, memberships, roles, group mappings, browser-session-only instance-admin authorization, organization creation, and batched collection-grant evaluation. |
 | `oidc.py` | Settings-configured single-provider OIDC discovery, PKCE login, browser binding, code exchange, ID-token validation, and logout/CSRF flows. |
 | `security.py` | Destination, public-address, scheme, and OIDC trust-boundary validation. |
 | `models.py` | SQLAlchemy persistence model and tenant-scoped constraints. |
@@ -37,11 +37,14 @@
    settings, stores a short-lived transaction and browser binding server-side, then atomically
    consumes it, validates the ID token, resolves a global `(issuer, subject)`
    identity, and issues an opaque persisted session. The console selects the
-   active enabled organization membership with a CSRF-protected POST.
+   active enabled organization with a CSRF-protected POST. A global instance
+   administrator can select any enabled organization without a membership and
+   create departments through the console; creation atomically grants an owner
+   membership only in the new department and selects it in the session.
 5. A browser request to `/console` resolves that persisted session, evaluates
    page permission through `auth.authorize`, then renders Jinja2 HTML. HTMX
-   requests receive only the content fragment; no console route mutates data in
-   Phase 4A.
+   requests receive only the content fragment. The only current console mutation
+   is instance-admin organization creation.
 
 ## Extension points
 

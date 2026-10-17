@@ -10,6 +10,7 @@ from coyote_mcp.auth import (
     authenticate_token,
     authorize,
     authorized_collection_ids,
+    effective_permissions,
     issue_browser_session,
     issue_pat,
     resolve_external_identity,
@@ -303,6 +304,108 @@ async def test_external_identity_resolution_categories_missing_and_disabled_prin
             jit_provisioning_enabled=False,
         )
     assert disabled_principal.value.category == "mapped_principal_disabled"
+
+
+@pytest.mark.asyncio
+async def test_instance_administrator_authorizes_enabled_ownerless_organizations(
+    session, organization: Organization
+) -> None:
+    administrator = Principal(identifier="instance-admin", display_name="Instance Administrator")
+    session.add(administrator)
+    await session.flush()
+    session.add(InstanceAdministrator(principal_id=administrator.id))
+    await session.commit()
+
+    for action in ALL_ACTIONS:
+        decision = await authorize(
+            session, administrator, action, context={"organization_id": organization.id}
+        )
+        assert decision.allowed
+        assert decision.reason == "instance_administrator"
+    assert (
+        await session.scalar(
+            select(OrganizationMembership).where(
+                OrganizationMembership.principal_id == administrator.id
+            )
+        )
+        is None
+    )
+    assert (
+        await session.scalar(
+            select(RoleAssignment).where(RoleAssignment.principal_id == administrator.id)
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_instance_administrator_does_not_bypass_pat_or_collection_publication_boundaries(
+    session, organization: Organization
+) -> None:
+    administrator = await create_principal(session, organization)
+    session.add(InstanceAdministrator(principal_id=administrator.id))
+    other_organization = Organization(slug="other-boundary", display_name="Other Boundary")
+    session.add(other_organization)
+    await session.flush()
+    collection = Collection(
+        organization_id=other_organization.id, slug="unpublished", display_name="Unpublished"
+    )
+    session.add(collection)
+    await session.commit()
+
+    _, token = await issue_pat(
+        session,
+        administrator,
+        organization.id,
+        "single-organization",
+        {"tool:discover"},
+        timedelta(days=1),
+        Settings(),
+    )
+    authenticated = await authenticate_token(session, token)
+
+    assert authenticated is not None
+    assert authenticated.organization_id == organization.id
+    assert not await authorized_collection_ids(
+        session, administrator, "tool:discover", [collection]
+    )
+
+
+@pytest.mark.asyncio
+async def test_instance_administrator_narrow_pat_does_not_inherit_browser_superuser_access(
+    session, organization: Organization
+) -> None:
+    administrator = await create_principal(session, organization, "viewer")
+    session.add(InstanceAdministrator(principal_id=administrator.id))
+    await session.commit()
+    _, token = await issue_pat(
+        session,
+        administrator,
+        organization.id,
+        "read-only-instance-admin",
+        {"server:read"},
+        timedelta(days=1),
+        Settings(),
+    )
+    pat_current = await authenticate_token(session, token)
+
+    assert pat_current is not None
+    assert pat_current.credential_context == "pat"
+    assert not (
+        await authorize(
+            session,
+            administrator,
+            "server:create",
+            context={"organization_id": organization.id},
+            credential_context=pat_current.credential_context,
+        )
+    ).allowed
+    assert "server:create" not in await effective_permissions(
+        session,
+        administrator,
+        organization.id,
+        credential_context=pat_current.credential_context,
+    )
 
 
 @pytest.mark.asyncio

@@ -125,9 +125,22 @@ uv run coyote-mcp bootstrap-instance-admin \
   --subject <trusted-subject>
 ```
 
+Fresh deployments have no organizations after migration. The bootstrapped
+instance administrator creates the first department from `/console`.
+
 This operator-only command does not validate an OIDC assertion and never emits a
 browser credential or PAT. Normal browser login begins at `/auth/oidc/login` and
 validates the OIDC assertion before issuing a session.
+
+After the bootstrapped administrator signs in at `/console`, they can select any
+enabled organization and use the CSRF-protected form to create a department.
+Instance administrators administer enabled organizations without synthetic
+memberships or owner roles, which supports ownerless-department recovery.
+Creation atomically grants the new department's enabled membership and
+organization-scoped `owner` role, then selects it in the server-side browser
+session. Ordinary authenticated users can select only their enabled memberships
+and cannot use the creation endpoint directly. PATs remain scoped to a single
+organization, and MCP discovery/execution still requires explicit publication.
 
 The authorization-code exchange uses PKCE S256, state, and nonce. Discovery
 metadata and JWKS are retrieved from the configured issuer; the application

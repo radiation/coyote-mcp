@@ -38,8 +38,6 @@ class Settings(BaseSettings):
     )
     max_execution_result_bytes: int = 1_048_576
     pat_max_lifetime_seconds: int = 60 * 60 * 24 * 90
-    default_organization_slug: str = "default"
-    default_organization_display_name: str = "Default Organization"
     environment: str = "development"
     session_secret_key: str = "development-only-change-me"
     session_max_age_seconds: int = 60 * 60 * 8

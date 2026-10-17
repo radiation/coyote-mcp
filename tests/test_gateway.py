@@ -25,8 +25,10 @@ from coyote_mcp.models import (
     Collection,
     CollectionMembership,
     CollectionToolPublication,
+    InstanceAdministrator,
     MCPServer,
     Organization,
+    OrganizationMembership,
     Principal,
     RoleAssignment,
     Tool,
@@ -139,24 +141,26 @@ async def add_catalog_tool(session: AsyncSession, source_tool: Tool, name: str) 
     return tool
 
 
-def publication_current(principal: Principal) -> AuthenticatedPrincipal:
-    return AuthenticatedPrincipal(principal, frozenset({"collection:update"}), None)
+def publication_current(principal: Principal, organization_id: UUID) -> AuthenticatedPrincipal:
+    return AuthenticatedPrincipal(
+        principal, frozenset({"collection:update"}), None, organization_id
+    )
 
 
 async def _collection_consumer(
     session: AsyncSession,
-) -> tuple[Principal, str, Tool]:
+) -> tuple[Principal, str, Tool, Organization]:
     suffix = uuid4().hex
     organization = Organization(slug=f"gateway-{suffix}", display_name="Gateway")
     session.add(organization)
     await session.flush()
     principal = Principal(
-        organization_id=organization.id,
         identifier=f"consumer-{suffix}",
         display_name="Consumer",
     )
     session.add(principal)
     await session.flush()
+    session.add(OrganizationMembership(organization_id=organization.id, principal_id=principal.id))
     collection = await catalog.create_collection(
         session,
         organization.id,
@@ -203,26 +207,27 @@ async def _collection_consumer(
     await session.refresh(tool)
     await catalog.publish_tool(
         session,
-        publication_current(principal),
+        publication_current(principal, organization.id),
         collection.id,
         PublicationCreate(tool_id=tool.id, published_name="downstream__issue_lookup"),
     )
     _, token = await issue_pat(
         session,
         principal,
+        organization.id,
         "consumer",
         {"collection:update", "tool:discover", "tool:describe", "tool:execute"},
         timedelta(days=1),
         Settings(),
     )
-    return principal, token, tool
+    return principal, token, tool, organization
 
 
 @pytest.mark.asyncio
 async def test_gateway_scoped_discovery_description_and_schema_validation(
     session: AsyncSession,
 ) -> None:
-    _, token, tool = await _collection_consumer(session)
+    _, token, tool, _ = await _collection_consumer(session)
     current = await authenticate_token(session, token)
     assert current is not None
     service = GatewayService(Settings())
@@ -252,14 +257,12 @@ async def test_gateway_scoped_discovery_description_and_schema_validation(
 
 @pytest.mark.asyncio
 async def test_gateway_hides_removed_collection_membership(session: AsyncSession) -> None:
-    principal, token, tool = await _collection_consumer(session)
+    _, token, tool, organization = await _collection_consumer(session)
     current = await authenticate_token(session, token)
     assert current is not None
     collection = await session.scalar(select(Collection))
     assert collection is not None
-    await catalog.remove_membership(
-        session, principal.organization_id, collection.id, tool.server_id
-    )
+    await catalog.remove_membership(session, organization.id, collection.id, tool.server_id)
 
     with pytest.raises(GatewayError, match="not available"):
         await GatewayService(Settings()).describe_tool(session, current, tool.id, "engineering")
@@ -267,13 +270,16 @@ async def test_gateway_hides_removed_collection_membership(session: AsyncSession
 
 @pytest.mark.asyncio
 async def test_global_gateway_default_denies_unpublished_tools(session: AsyncSession) -> None:
-    principal, token, tool = await _collection_consumer(session)
+    principal, token, tool, organization = await _collection_consumer(session)
     current = await authenticate_token(session, token)
     publication = await session.scalar(select(CollectionToolPublication))
     assert current is not None
     assert publication is not None
     await catalog.remove_publication(
-        session, publication_current(principal), publication.collection_id, publication.id
+        session,
+        publication_current(principal, organization.id),
+        publication.collection_id,
+        publication.id,
     )
 
     assert await GatewayService(Settings()).search_tools(session, current, "lookup", None, 10) == []
@@ -284,26 +290,89 @@ async def test_global_gateway_default_denies_unpublished_tools(session: AsyncSes
 
 
 @pytest.mark.asyncio
+async def test_instance_administrator_pat_does_not_bypass_unpublished_tools(
+    session: AsyncSession,
+) -> None:
+    organization = Organization(slug="admin-publication", display_name="Admin Publication")
+    principal = Principal(identifier="admin-publication", display_name="Administrator")
+    session.add_all([organization, principal])
+    await session.flush()
+    collection = Collection(
+        organization_id=organization.id, slug="engineering", display_name="Engineering"
+    )
+    server = MCPServer(
+        organization_id=organization.id,
+        name="unpublished",
+        display_name="Unpublished",
+        endpoint="https://example.com/mcp",
+        status="ready",
+    )
+    session.add_all(
+        [
+            collection,
+            server,
+            OrganizationMembership(organization_id=organization.id, principal_id=principal.id),
+            RoleAssignment(
+                organization_id=organization.id, principal_id=principal.id, role="owner"
+            ),
+            InstanceAdministrator(principal_id=principal.id),
+        ]
+    )
+    await session.flush()
+    session.add(
+        CollectionMembership(
+            collection_id=collection.id, server_id=server.id, organization_id=organization.id
+        )
+    )
+    session.add(
+        Tool(
+            server_id=server.id,
+            name="unpublished_lookup",
+            description="Unpublished",
+            input_schema={"type": "object"},
+            annotations={},
+            fingerprint="u" * 64,
+            active=True,
+            last_seen_at=datetime.now(UTC),
+        )
+    )
+    await session.commit()
+    _, token = await issue_pat(
+        session,
+        principal,
+        organization.id,
+        "instance-admin",
+        {"tool:discover"},
+        timedelta(days=1),
+        Settings(),
+    )
+    current = await authenticate_token(session, token)
+
+    assert current is not None
+    assert await GatewayService(Settings()).search_tools(session, current, "lookup", None, 10) == []
+
+
+@pytest.mark.asyncio
 async def test_global_gateway_requires_context_for_multiple_publications(
     session: AsyncSession,
 ) -> None:
-    principal, token, tool = await _collection_consumer(session)
+    principal, token, tool, organization = await _collection_consumer(session)
     collection = await session.scalar(select(Collection))
     assert collection is not None
     second_collection = await catalog.create_collection(
         session,
-        principal.organization_id,
+        organization.id,
         CollectionCreate(slug="operations", display_name="Operations"),
     )
     await catalog.add_membership(
         session,
-        principal.organization_id,
+        organization.id,
         second_collection.id,
         MembershipCreate(server_id=tool.server_id),
     )
     session.add(
         RoleAssignment(
-            organization_id=principal.organization_id,
+            organization_id=organization.id,
             principal_id=principal.id,
             role="consumer",
             collection_id=None,
@@ -311,7 +380,7 @@ async def test_global_gateway_requires_context_for_multiple_publications(
     )
     session.add(
         RoleAssignment(
-            organization_id=principal.organization_id,
+            organization_id=organization.id,
             principal_id=principal.id,
             role="administrator",
             collection_id=second_collection.id,
@@ -326,7 +395,7 @@ async def test_global_gateway_requires_context_for_multiple_publications(
         await service.execute_tool(session, current, tool.id, {}, "operations")
     await catalog.publish_tool(
         session,
-        publication_current(principal),
+        publication_current(principal, organization.id),
         second_collection.id,
         PublicationCreate(tool_id=tool.id, published_name="operations_lookup"),
     )
@@ -368,7 +437,7 @@ async def test_authenticated_mcp_client_negotiates_and_lists_gateway_tools(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory() as session:
-        _, token, _ = await _collection_consumer(session)
+        _, token, _, _ = await _collection_consumer(session)
 
     def http_client_factory(
         headers: dict[str, str] | None = None,
@@ -416,7 +485,7 @@ async def test_mcp_client_executes_authorized_catalog_tool_end_to_end(
     session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async with session_factory() as session:
-        _, token, tool = await _collection_consumer(session)
+        _, token, tool, _ = await _collection_consumer(session)
 
     monkeypatch.setenv("ALLOW_INSECURE_ENDPOINTS", "true")
     monkeypatch.setenv("ALLOW_PRIVATE_ENDPOINTS", "true")
@@ -482,7 +551,7 @@ async def test_native_collection_endpoint_lists_and_executes_persisted_tools(
     monkeypatch.setenv("ALLOW_INSECURE_ENDPOINTS", "true")
     monkeypatch.setenv("ALLOW_PRIVATE_ENDPOINTS", "true")
     async with session_factory() as session:
-        _, token, tool = await _collection_consumer(session)
+        _, token, tool, _ = await _collection_consumer(session)
         collection = await session.scalar(select(Collection))
         assert collection is not None
         collection.exposure_mode = "native"
@@ -529,7 +598,7 @@ async def test_collection_discovery_endpoint_binds_its_collection_context(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory() as session:
-        _, token, tool = await _collection_consumer(session)
+        _, token, tool, _ = await _collection_consumer(session)
 
     original_factory = app.state.mcp_session_factory
     app.state.mcp_session_factory = session_factory
@@ -562,28 +631,26 @@ async def test_collection_endpoint_cannot_execute_an_organization_wide_tool_outs
     monkeypatch.setenv("ALLOW_INSECURE_ENDPOINTS", "true")
     monkeypatch.setenv("ALLOW_PRIVATE_ENDPOINTS", "true")
     async with session_factory() as session:
-        principal, token, tool = await _collection_consumer(session)
+        principal, token, tool, organization = await _collection_consumer(session)
         collection = await session.scalar(select(Collection))
         server = await session.get(MCPServer, tool.server_id)
         assert collection is not None
         assert server is not None
         other_collection = await catalog.create_collection(
             session,
-            principal.organization_id,
+            organization.id,
             CollectionCreate(slug="other", display_name="Other"),
         )
-        await catalog.remove_membership(
-            session, principal.organization_id, collection.id, server.id
-        )
+        await catalog.remove_membership(session, organization.id, collection.id, server.id)
         await catalog.add_membership(
             session,
-            principal.organization_id,
+            organization.id,
             other_collection.id,
             MembershipCreate(server_id=server.id),
         )
         session.add(
             RoleAssignment(
-                organization_id=principal.organization_id,
+                organization_id=organization.id,
                 principal_id=principal.id,
                 role="consumer",
                 collection_id=None,
@@ -617,13 +684,13 @@ async def test_native_collection_endpoint_namespaces_duplicates_and_refreshes_ca
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory() as session:
-        principal, token, tool = await _collection_consumer(session)
+        principal, token, tool, organization = await _collection_consumer(session)
         collection = await session.scalar(select(Collection))
         assert collection is not None
         collection.exposure_mode = "native"
         duplicate_server = await catalog.create_server(
             session,
-            principal.organization_id,
+            organization.id,
             ServerCreate(
                 name="secondary",
                 display_name="Secondary",
@@ -633,7 +700,7 @@ async def test_native_collection_endpoint_namespaces_duplicates_and_refreshes_ca
         duplicate_server.status = "ready"
         await catalog.add_membership(
             session,
-            principal.organization_id,
+            organization.id,
             collection.id,
             MembershipCreate(server_id=duplicate_server.id),
         )
@@ -651,7 +718,7 @@ async def test_native_collection_endpoint_namespaces_duplicates_and_refreshes_ca
         await session.commit()
         await catalog.publish_tool(
             session,
-            publication_current(principal),
+            publication_current(principal, organization.id),
             collection.id,
             PublicationCreate(tool_id=duplicate.id, published_name="secondary__issue_lookup"),
         )
@@ -682,7 +749,7 @@ async def test_native_collection_endpoint_namespaces_duplicates_and_refreshes_ca
 async def test_native_collection_aliases_are_stable_and_unique(
     session: AsyncSession,
 ) -> None:
-    principal, token, tool = await _collection_consumer(session)
+    principal, token, tool, organization = await _collection_consumer(session)
     collection = await session.scalar(select(Collection))
     publication = await session.scalar(select(CollectionToolPublication))
     server = await session.get(MCPServer, tool.server_id)
@@ -697,7 +764,7 @@ async def test_native_collection_aliases_are_stable_and_unique(
     with pytest.raises(catalog.DuplicateResourceError):
         await catalog.publish_tool(
             session,
-            publication_current(principal),
+            publication_current(principal, organization.id),
             collection.id,
             PublicationCreate(tool_id=tool.id, published_name="curated_lookup"),
         )
@@ -715,7 +782,7 @@ async def test_native_collection_aliases_are_stable_and_unique(
 async def test_native_collection_rejects_unpublished_or_disabled_tool_execution(
     session: AsyncSession,
 ) -> None:
-    _, token, tool = await _collection_consumer(session)
+    _, token, tool, _ = await _collection_consumer(session)
     collection = await session.scalar(select(Collection))
     publication = await session.scalar(select(CollectionToolPublication))
     assert collection is not None
@@ -741,14 +808,14 @@ async def test_native_collection_tool_limit_rejects_partial_publication(
     session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async with session_factory() as session:
-        principal, token, tool = await _collection_consumer(session)
+        principal, token, tool, organization = await _collection_consumer(session)
         collection = await session.scalar(select(Collection))
         assert collection is not None
         collection.exposure_mode = "native"
         second_tool = await add_catalog_tool(session, tool, "second_lookup")
         await catalog.publish_tool(
             session,
-            publication_current(principal),
+            publication_current(principal, organization.id),
             collection.id,
             PublicationCreate(tool_id=second_tool.id, published_name="downstream__second_lookup"),
         )
@@ -770,7 +837,7 @@ async def test_native_collection_endpoint_hides_disabled_and_non_executable_view
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory() as session:
-        principal, token, _ = await _collection_consumer(session)
+        principal, token, _, _ = await _collection_consumer(session)
         collection = await session.scalar(select(Collection))
         assignment = await session.scalar(
             select(RoleAssignment).where(RoleAssignment.principal_id == principal.id)
@@ -827,7 +894,7 @@ async def test_collection_endpoint_rejects_revoked_pat(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory() as session:
-        _, token, _ = await _collection_consumer(session)
+        _, token, _, _ = await _collection_consumer(session)
         current = await authenticate_token(session, token)
         assert current is not None
         assert current.token is not None
@@ -855,13 +922,13 @@ async def test_native_collection_endpoint_isolates_concurrent_tenants(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory() as session:
-        first_principal, first_token, first_tool = await _collection_consumer(session)
-        second_principal, second_token, second_tool = await _collection_consumer(session)
+        _, first_token, first_tool, first_organization = await _collection_consumer(session)
+        _, second_token, second_tool, second_organization = await _collection_consumer(session)
         first_collection = await session.scalar(
-            select(Collection).where(Collection.organization_id == first_principal.organization_id)
+            select(Collection).where(Collection.organization_id == first_organization.id)
         )
         second_collection = await session.scalar(
-            select(Collection).where(Collection.organization_id == second_principal.organization_id)
+            select(Collection).where(Collection.organization_id == second_organization.id)
         )
         first_server = await session.get(MCPServer, first_tool.server_id)
         second_server = await session.get(MCPServer, second_tool.server_id)
@@ -911,7 +978,7 @@ async def test_native_collection_endpoint_isolates_concurrent_tenants(
 async def test_gateway_preserves_tool_errors_and_enforces_execution_limits(
     session: AsyncSession,
 ) -> None:
-    principal, token, tool = await _collection_consumer(session)
+    principal, token, tool, organization = await _collection_consumer(session)
     current = await authenticate_token(session, token)
     assert current is not None
 
@@ -926,7 +993,7 @@ async def test_gateway_preserves_tool_errors_and_enforces_execution_limits(
         for published_tool in (failing_tool, delayed_tool, large_tool, nullable_tool):
             await catalog.publish_tool(
                 session,
-                publication_current(principal),
+                publication_current(principal, organization.id),
                 collection.id,
                 PublicationCreate(
                     tool_id=published_tool.id, published_name=f"downstream__{published_tool.name}"
@@ -968,7 +1035,7 @@ async def test_gateway_preserves_tool_errors_and_enforces_execution_limits(
 async def test_gateway_execution_does_not_finalize_caller_transaction(
     session: AsyncSession,
 ) -> None:
-    _, token, tool = await _collection_consumer(session)
+    _, token, tool, _ = await _collection_consumer(session)
     current = await authenticate_token(session, token)
     assert current is not None
 
@@ -989,7 +1056,7 @@ async def test_gateway_execution_does_not_finalize_caller_transaction(
 async def test_gateway_rechecks_catalog_authorization_and_credentials_before_execution(
     session: AsyncSession,
 ) -> None:
-    principal, token, tool = await _collection_consumer(session)
+    principal, token, tool, organization = await _collection_consumer(session)
     current = await authenticate_token(session, token)
     assert current is not None
     service = GatewayService(Settings())
@@ -1008,7 +1075,7 @@ async def test_gateway_rechecks_catalog_authorization_and_credentials_before_exe
     assert collection is not None
     session.add(
         RoleAssignment(
-            organization_id=principal.organization_id,
+            organization_id=organization.id,
             principal_id=principal.id,
             role="consumer",
             collection_id=collection.id,
@@ -1024,7 +1091,7 @@ async def test_gateway_rechecks_catalog_authorization_and_credentials_before_exe
 
 @pytest.mark.asyncio
 async def test_gateway_rejects_malformed_schemas_and_hardens_search(session: AsyncSession) -> None:
-    _, token, tool = await _collection_consumer(session)
+    _, token, tool, _ = await _collection_consumer(session)
     current = await authenticate_token(session, token)
     assert current is not None
     service = GatewayService(Settings())
@@ -1044,7 +1111,7 @@ async def test_gateway_rejects_malformed_schemas_and_hardens_search(session: Asy
 
 @pytest.mark.asyncio
 async def test_gateway_bounds_untrusted_schema_validation(session: AsyncSession) -> None:
-    _, token, tool = await _collection_consumer(session)
+    _, token, tool, _ = await _collection_consumer(session)
     current = await authenticate_token(session, token)
     assert current is not None
     tool.input_schema = {
@@ -1089,7 +1156,7 @@ async def test_gateway_allows_local_schema_references_and_rejects_external_ones(
 async def test_gateway_rechecks_membership_tool_server_and_collection_context(
     session: AsyncSession,
 ) -> None:
-    principal, token, tool = await _collection_consumer(session)
+    _, token, tool, organization = await _collection_consumer(session)
     current = await authenticate_token(session, token)
     assert current is not None
     collection = await session.scalar(select(Collection))
@@ -1106,24 +1173,24 @@ async def test_gateway_rechecks_membership_tool_server_and_collection_context(
 
     other_collection = await catalog.create_collection(
         session,
-        principal.organization_id,
+        organization.id,
         CollectionCreate(slug="restricted", display_name="Restricted"),
     )
     await catalog.add_membership(
         session,
-        principal.organization_id,
+        organization.id,
         other_collection.id,
         MembershipCreate(server_id=server.id),
     )
     with pytest.raises(GatewayError, match="not available"):
         await service.execute_tool(session, current, tool.id, {"issue": 1}, "restricted")
 
-    await catalog.remove_membership(session, principal.organization_id, collection.id, server.id)
+    await catalog.remove_membership(session, organization.id, collection.id, server.id)
     with pytest.raises(GatewayError, match="not available"):
         await service.execute_tool(session, current, tool.id, {"issue": 1}, "engineering")
 
     await catalog.add_membership(
-        session, principal.organization_id, collection.id, MembershipCreate(server_id=server.id)
+        session, organization.id, collection.id, MembershipCreate(server_id=server.id)
     )
     tool.active = False
     await session.commit()

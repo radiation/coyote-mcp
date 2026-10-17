@@ -13,14 +13,19 @@ that must preserve these invariants.
   tools for discovery. Collection membership never independently grants access;
   only a role assignment or group-role mapping can grant a collection scope.
 - **Authorization is centralized and default-deny.** `auth.authorize` evaluates
-  an enabled principal, known action, matching organization, roles, and optional
-  collection scope. Callers must enforce that decision in application services,
-  not exclusively in HTTP handlers. Collection-list authorization uses the same
-  policy data through a batched helper so unscoped discovery does not issue one
-  role lookup per collection.
-- **PAT scopes attenuate permissions.** PAT creation requires requested scopes
-  to be a subset of the principal's direct role permissions; a request must
-  satisfy both its token scope and current role evaluation.
+  an enabled principal, known action, and enabled organization. Explicit
+  membership and roles remain required for ordinary principals. An enabled
+  instance administrator is the sole shared override for browser-session
+  organization administration and does not create synthetic memberships or
+  owner roles. PAT-authenticated REST calls retain their explicit scopes and
+  role evaluation. Callers must enforce that decision in application services,
+  not exclusively in HTTP handlers. Collection-list authorization stays
+  membership-based for PAT-authenticated MCP discovery and execution.
+- **PAT scopes attenuate permissions.** PATs remain bound to one organization.
+  PAT creation requires requested scopes to be a subset of the principal's
+  direct role permissions; a request must satisfy both its token scope and
+  current role evaluation. Instance-administrator status does not create a
+  cross-organization PAT or bypass publication requirements.
 - **External identities use issuer and subject.** The immutable identity key is
   `(issuer, subject)`; email is display metadata and never the
   linking key.
@@ -97,6 +102,8 @@ that must preserve these invariants.
   where practical. Greenfield corrective revisions may rebuild transient session,
   transaction, and group-mapping tables when removing obsolete authentication
   storage; `0014` intentionally does so without changing external identities.
+  `0015` removes only the unused legacy `default` organization seed so fresh
+  deployments begin without departments.
 - **Local smoke destinations are narrow exceptions.** The optional Compose
   `smoke-mcp` service is reachable only on the Compose network. Its plain-HTTP
   private address is accepted only when both destination hostname allowlists
@@ -108,11 +115,15 @@ that must preserve these invariants.
 - **Credentialed downstream integrations:** The registry has no general
   downstream credential storage or propagation mechanism yet. Any future
   mechanism must preserve the secret and destination protections above.
-- **Console and semantic discovery:** The read-only HTMX console uses only
-  persisted registry data, server-side browser sessions, and centralized
-  authorization. Its aggregate dashboard queries are organization-scoped. CRUD,
-  semantic discovery, auditing, metrics, and richer policy features remain
-  future work and must not create a parallel policy path.
+- **Console and semantic discovery:** The HTMX console uses only persisted
+  registry data, server-side browser sessions, and centralized authorization.
+  Its aggregate dashboard queries are organization-scoped. An authenticated,
+  enabled instance administrator may use the CSRF-protected organization form
+  to create a department. The transaction creates an owner membership only for
+  the newly created department; instance-admin access to existing departments
+  is authorization-based, not represented by synthetic roles or memberships.
+  Other CRUD, semantic discovery, auditing, metrics, and richer policy features
+  remain future work and must not create a parallel policy path.
 - **Fine-grained tool policy:** Publication curation controls discovery and native visibility;
   per-principal tool-specific allow and deny policies are not implemented. Tool
   annotations are untrusted metadata and never imply safety.

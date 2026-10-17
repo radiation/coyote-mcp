@@ -9,7 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from coyote_mcp.app import app
 from coyote_mcp.auth import ALL_ACTIONS, authenticate_token, issue_pat
 from coyote_mcp.db import get_session
-from coyote_mcp.models import Organization, OrganizationMembership, Principal, RoleAssignment, Tool
+from coyote_mcp.models import (
+    InstanceAdministrator,
+    Organization,
+    OrganizationMembership,
+    Principal,
+    RoleAssignment,
+    Tool,
+)
 from coyote_mcp.settings import Settings
 
 
@@ -70,6 +77,59 @@ async def test_register_server_and_duplicate_response(
     assert response.json()["name"] == "example"
     assert duplicate.status_code == 409
     assert [server["name"] for server in listing.json()] == ["example"]
+
+
+@pytest.mark.asyncio
+async def test_instance_administrator_read_only_pat_cannot_register_server(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    async with session_factory() as session:
+        organization = Organization(slug="narrow-admin", display_name="Narrow Admin")
+        principal = Principal(identifier="narrow-admin", display_name="Narrow Admin")
+        session.add_all([organization, principal])
+        await session.flush()
+        session.add_all(
+            [
+                OrganizationMembership(organization_id=organization.id, principal_id=principal.id),
+                RoleAssignment(
+                    organization_id=organization.id, principal_id=principal.id, role="viewer"
+                ),
+                InstanceAdministrator(principal_id=principal.id),
+            ]
+        )
+        await session.commit()
+        _, token = await issue_pat(
+            session,
+            principal,
+            organization.id,
+            "read-only",
+            {"server:read"},
+            timedelta(days=1),
+            Settings(),
+        )
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                "/api/v1/servers",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "name": "denied",
+                    "display_name": "Denied",
+                    "endpoint": "https://example.com/mcp",
+                },
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 403
 
 
 @pytest.mark.asyncio

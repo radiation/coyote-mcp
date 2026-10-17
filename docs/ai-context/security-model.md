@@ -25,9 +25,20 @@ claims before it issues a session.
 
 Authorization is centralized in `auth.authorize`, default-deny, and scoped to an
 immutable organization context carried by the authenticated request, never by
-the global `Principal` ORM object. Authorization rechecks enabled principal,
-enabled organization, and enabled explicit membership at each boundary. Roles
-can be organization-wide or collection-wide.
+the global `Principal` ORM object. Authorization rechecks enabled principals and
+organizations. Ordinary principals also require enabled explicit membership and
+organization or collection roles. An enabled global `InstanceAdministrator` is
+the centralized browser-session superuser override and may select and administer
+any enabled organization, including an ownerless organization, without synthetic
+memberships or roles. Its CSRF-protected organization creation transaction adds
+an enabled membership and owner role only in the new organization. Ordinary
+authenticated users are denied when they call the creation or selection paths
+outside their memberships.
+PAT authentication remains organization-bound, requires an enabled membership,
+and retains explicit PAT scopes plus organization-role evaluation; instance-admin
+status does not elevate a PAT or create a cross-organization PAT.
+MCP collection authorization remains membership- and publication-gated, so an
+instance-administrator PAT cannot discover or execute unpublished tools.
 PAT scopes further attenuate permissions. External identities use issuer plus
 subject, not email. Groups are taken from validated ID-token claims and evaluated
 against organization-scoped mappings.

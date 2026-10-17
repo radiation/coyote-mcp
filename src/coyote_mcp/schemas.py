@@ -10,6 +10,11 @@ class Page(BaseModel):
     offset: int = Field(default=0, ge=0)
 
 
+class OrganizationCreate(BaseModel):
+    slug: str = Field(min_length=1, max_length=160, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    display_name: str = Field(min_length=1, max_length=255)
+
+
 class ServerCreate(BaseModel):
     name: str = Field(min_length=1, max_length=160, pattern=r"^[a-z0-9][a-z0-9-]*$")
     display_name: str = Field(min_length=1, max_length=160)

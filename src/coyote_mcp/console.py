@@ -8,20 +8,25 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import ValidationError
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coyote_mcp.auth import (
     AuthenticatedPrincipal,
+    OrganizationBootstrapError,
     authenticate_browser_session,
     authorize,
     available_organizations,
+    create_initial_organization,
     csrf_token_valid,
+    is_instance_administrator,
     rotate_csrf_token,
     select_active_organization,
 )
 from coyote_mcp.db import get_session
 from coyote_mcp.models import Collection, CollectionToolPublication, MCPServer, Organization, Tool
+from coyote_mcp.schemas import OrganizationCreate
 from coyote_mcp.settings import Settings
 
 router = APIRouter(prefix="/console", include_in_schema=False)
@@ -56,6 +61,7 @@ async def _authorized(session: AsyncSession, current: AuthenticatedPrincipal, ac
         action,
         context={"organization_id": current.require_organization_id()},
         verified_group_ids=current.verified_group_ids,
+        credential_context=current.credential_context,
     )
     return decision.allowed
 
@@ -155,11 +161,16 @@ async def console_login(request: Request) -> Response:
 
 
 async def _select_organization_page(
-    request: Request, session: AsyncSession, current: AuthenticatedPrincipal
+    request: Request,
+    session: AsyncSession,
+    current: AuthenticatedPrincipal,
+    *,
+    creation_error: str | None = None,
+    response_status: int = status.HTTP_200_OK,
 ) -> Response:
     if current.browser_session is None:
         return _render_access_required(request)
-    organizations = await available_organizations(session, current.principal)
+    organizations = await available_organizations(session, current)
     if len(organizations) == 1:
         await select_active_organization(session, current, organizations[0].id)
         return RedirectResponse("/console", status_code=status.HTTP_303_SEE_OTHER)
@@ -172,8 +183,11 @@ async def _select_organization_page(
             current,
             page_title="Select organization",
             organizations=organizations,
+            can_create_organization=await is_instance_administrator(session, current.principal),
+            creation_error=creation_error,
             csrf_token=csrf_token,
         ),
+        status_code=response_status,
     )
 
 
@@ -194,6 +208,54 @@ async def select_organization(request: Request, session: Session) -> Response:
     except ValueError:
         return _render_forbidden(request, current)
     if not await select_active_organization(session, current, organization_id):
+        return _render_forbidden(request, current)
+    return RedirectResponse("/console", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/organizations")
+async def create_organization(request: Request, session: Session) -> Response:
+    current = await _browser_principal(request, session)
+    if current is None or current.browser_session is None:
+        return _render_access_required(request)
+    form = await request.form()
+    csrf_token = form.get("csrf_token")
+    if not isinstance(csrf_token, str) or not csrf_token_valid(current.browser_session, csrf_token):
+        return _render_forbidden(request, current)
+    slug = form.get("slug")
+    display_name = form.get("display_name")
+    if not isinstance(slug, str) or not isinstance(display_name, str):
+        return await _select_organization_page(
+            request,
+            session,
+            current,
+            creation_error="Enter a valid organization slug and display name.",
+            response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        )
+    try:
+        organization_request = OrganizationCreate(slug=slug, display_name=display_name)
+        await create_initial_organization(
+            session,
+            current,
+            slug=organization_request.slug,
+            display_name=organization_request.display_name,
+        )
+    except ValidationError:
+        return await _select_organization_page(
+            request,
+            session,
+            current,
+            creation_error="Enter a valid organization slug and display name.",
+            response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        )
+    except OrganizationBootstrapError as error:
+        if error.category == "duplicate_slug":
+            return await _select_organization_page(
+                request,
+                session,
+                current,
+                creation_error="An organization with this slug already exists.",
+                response_status=status.HTTP_409_CONFLICT,
+            )
         return _render_forbidden(request, current)
     return RedirectResponse("/console", status_code=status.HTTP_303_SEE_OTHER)
 
