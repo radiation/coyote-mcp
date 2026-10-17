@@ -281,6 +281,7 @@ class GatewayService:
                         CollectionToolPublication.enabled.is_(True),
                         CollectionMembership.enabled.is_(True),
                         Tool.active.is_(True),
+                        MCPServer.enabled.is_(True),
                         MCPServer.status == "ready",
                         MCPServer.transport == "streamable_http",
                     )
@@ -467,6 +468,7 @@ class GatewayService:
                 CollectionToolPublication.enabled.is_(True),
                 CollectionMembership.enabled.is_(True),
                 Tool.active.is_(True),
+                MCPServer.enabled.is_(True),
                 MCPServer.status == "ready",
                 MCPServer.transport == "streamable_http",
             )
@@ -492,6 +494,7 @@ class GatewayService:
                 Tool.id == tool_id,
                 MCPServer.organization_id == current.require_organization_id(),
                 Tool.active.is_(True),
+                MCPServer.enabled.is_(True),
                 MCPServer.status == "ready",
                 MCPServer.transport == "streamable_http",
             )

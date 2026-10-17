@@ -255,18 +255,27 @@ async def authenticate_browser_session(
     )
 
 
-async def rotate_csrf_token(session: AsyncSession, browser_session: BrowserSession) -> str:
-    token = secrets.token_urlsafe(32)
-    browser_session.csrf_token_hash = _hash_secret(token)
+def csrf_token_for(browser_session: BrowserSession, settings: Settings) -> str:
+    message = f"{browser_session.token_hash}\x00{browser_session.csrf_epoch}".encode()
+    return hmac.new(
+        settings.session_secret_key.encode("utf-8"), message, hashlib.sha256
+    ).hexdigest()
+
+
+async def rotate_csrf_token(
+    session: AsyncSession, browser_session: BrowserSession, settings: Settings
+) -> str:
+    browser_session.csrf_epoch += 1
+    token = csrf_token_for(browser_session, settings)
     await session.commit()
     return token
 
 
-def csrf_token_valid(browser_session: BrowserSession, token: str | None) -> bool:
-    return (
-        token is not None
-        and browser_session.csrf_token_hash is not None
-        and hmac.compare_digest(browser_session.csrf_token_hash, _hash_secret(token))
+def csrf_token_valid(
+    browser_session: BrowserSession, token: str | None, settings: Settings
+) -> bool:
+    return token is not None and hmac.compare_digest(
+        csrf_token_for(browser_session, settings), token
     )
 
 

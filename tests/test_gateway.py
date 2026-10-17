@@ -290,6 +290,32 @@ async def test_global_gateway_default_denies_unpublished_tools(session: AsyncSes
 
 
 @pytest.mark.asyncio
+async def test_disabled_server_tools_are_hidden_from_discovery_and_execution(
+    session: AsyncSession,
+) -> None:
+    _, token, tool, _ = await _collection_consumer(session)
+    collection = await session.scalar(select(Collection))
+    assert collection is not None
+    collection.exposure_mode = "native"
+    current = await authenticate_token(session, token)
+    assert current is not None
+    gateway = GatewayService(Settings())
+    assert await gateway.native_tools(session, current, "engineering") != []
+
+    server = await session.get(MCPServer, tool.server_id)
+    assert server is not None
+    server.enabled = False
+    await session.commit()
+
+    assert await gateway.search_tools(session, current, "lookup", None, 10) == []
+    assert await gateway.native_tools(session, current, "engineering") == []
+    with pytest.raises(GatewayError, match="not available"):
+        await gateway.describe_tool(session, current, tool.id, None)
+    with pytest.raises(GatewayError, match="not available"):
+        await gateway.execute_tool(session, current, tool.id, {}, None)
+
+
+@pytest.mark.asyncio
 async def test_instance_administrator_pat_does_not_bypass_unpublished_tools(
     session: AsyncSession,
 ) -> None:
@@ -591,6 +617,61 @@ async def test_native_collection_endpoint_lists_and_executes_persisted_tools(
     assert [tool.name for tool in tools] == ["downstream__issue_lookup"]
     assert result.is_error is False
     assert result.data == {"issue": 42}
+
+
+@pytest.mark.asyncio
+async def test_unpublishing_removes_native_tool_from_discovery_and_execution(
+    session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ALLOW_INSECURE_ENDPOINTS", "true")
+    monkeypatch.setenv("ALLOW_PRIVATE_ENDPOINTS", "true")
+    async with session_factory() as session:
+        principal, token, tool, organization = await _collection_consumer(session)
+        collection = await session.scalar(select(Collection))
+        assert collection is not None
+        collection.exposure_mode = "native"
+        publication = await session.scalar(
+            select(CollectionToolPublication).where(CollectionToolPublication.tool_id == tool.id)
+        )
+        assert publication is not None
+        collection_id = collection.id
+        publication_id = publication.id
+        await session.commit()
+
+    async with downstream_server() as (endpoint, _):
+        async with session_factory() as session:
+            await point_tool_at_downstream(session, tool, endpoint)
+
+        original_factory = app.state.mcp_session_factory
+        app.state.mcp_session_factory = session_factory
+        try:
+            async with app.router.lifespan_context(app):
+                async with Client(collection_mcp_transport(token, "engineering")) as client:
+                    tools_before = await client.list_tools()
+                    result_before = await client.call_tool(
+                        "downstream__issue_lookup", {"issue": 42}
+                    )
+                    async with session_factory() as session:
+                        await catalog.remove_publication(
+                            session,
+                            publication_current(principal, organization.id),
+                            collection_id,
+                            publication_id,
+                        )
+                        await session.commit()
+                    tools_after = await client.list_tools()
+                    denied = await client.call_tool(
+                        "downstream__issue_lookup",
+                        {"issue": 42},
+                        raise_on_error=False,
+                    )
+        finally:
+            app.state.mcp_session_factory = original_factory
+
+    assert [listed.name for listed in tools_before] == ["downstream__issue_lookup"]
+    assert result_before.is_error is False
+    assert tools_after == []
+    assert denied.is_error is True
 
 
 @pytest.mark.asyncio

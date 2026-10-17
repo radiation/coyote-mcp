@@ -1,0 +1,24 @@
+{% import "console/components.html" as components %}
+{{ components.page_header('Tool Catalog', "Tools discovered from registered downstream servers in this organization. Discovery never publishes a tool; publish tools from a collection's publications page.") }}
+{% if tools %}
+<section class="section-block" aria-labelledby="tool-catalog-title">
+  <div class="section-heading"><h2 id="tool-catalog-title">Discovered tools</h2></div>
+  {% if not can_view_publications %}<p class="muted">Publication state is shown to administrators who can manage collections.</p>{% endif %}
+  <div class="table-wrap"><table><thead><tr>
+    <th scope="col">Tool</th>
+    <th scope="col">Server</th>
+    <th scope="col">Discovery</th>
+    {% if can_view_publications %}<th scope="col">Publication</th>{% endif %}
+    <th scope="col">Description</th>
+  </tr></thead><tbody>
+    {% for tool, server in tools %}<tr>
+      <td><code>{{ tool.name }}</code></td>
+      <td><a href="{{ url_for('server_detail', server_id=server.id) }}">{{ server.display_name }}</a></td>
+      <td>{% if tool.active %}<span class="badge badge-ready">Active</span>{% else %}<span class="badge badge-unavailable">Inactive</span>{% endif %}</td>
+      {% if can_view_publications %}{% set count = publication_counts.get(tool.id, 0) %}<td>{% if count %}Published in {{ count }} collection{{ '' if count == 1 else 's' }}{% else %}<span class="badge badge-unpublished">Unpublished</span>{% endif %}</td>{% endif %}
+      <td class="wrap-text">{{ tool.description or '' }}</td>
+    </tr>{% endfor %}
+  </tbody></table></div>
+  {{ components.pagination(request, page, has_next) }}
+</section>
+{% else %}{{ components.empty_state('No tools discovered', 'Register a downstream server and run discovery to see its tools here.') }}{% endif %}

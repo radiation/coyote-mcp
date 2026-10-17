@@ -1,0 +1,48 @@
+{% import "console/components.html" as components %}
+{{ components.page_header(server.display_name, 'Downstream MCP server') }}
+{% if action_error %}<div class="form-error" role="alert">{{ action_error }}</div>{% endif %}
+<section class="section-block" aria-labelledby="server-details-title">
+  <div class="section-heading"><h2 id="server-details-title">Details</h2></div>
+  <dl class="detail-list">
+    <dt>Name</dt><dd>{{ server.name }}</dd>
+    <dt>Status</dt><dd>{{ components.status_badge(server.status) }}</dd>
+    <dt>Enabled</dt><dd>{% if server.enabled %}Enabled{% else %}Disabled — tools are excluded from discovery and execution{% endif %}</dd>
+    <dt>Endpoint</dt><dd><code>{{ server.endpoint|redacted_endpoint }}</code></dd>
+    <dt>Transport</dt><dd>{{ server.transport }}</dd>
+    <dt>Last synchronized</dt><dd>{% if server.last_synced_at %}{{ server.last_synced_at.strftime('%Y-%m-%d %H:%M UTC') }}{% else %}Not synchronized{% endif %}</dd>
+  </dl>
+  {% if server.last_sync_error %}<div class="form-error" role="alert"><strong>Last discovery error</strong><p>{{ server.last_sync_error }}</p></div>{% endif %}
+  <div class="action-row">
+    {% if can_sync %}
+    <form method="post" action="{{ url_for('server_sync', server_id=server.id) }}" hx-boost="false" class="inline-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit">Refresh discovery</button>
+    </form>
+    {% endif %}
+    {% if can_update %}
+    <a class="button button-secondary" href="{{ url_for('server_edit_form', server_id=server.id) }}">Edit server</a>
+    <form method="post" action="{{ url_for('server_set_enabled', server_id=server.id) }}" hx-boost="false" class="inline-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="enabled" value="{{ 'false' if server.enabled else 'true' }}">
+      <button type="submit" class="button-secondary">{{ 'Disable server' if server.enabled else 'Enable server' }}</button>
+    </form>
+    <form method="post" action="{{ url_for('server_delete', server_id=server.id) }}" hx-boost="false" class="inline-form" onsubmit="return confirm('Remove this server? This cannot be undone.');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="button-danger">Remove server</button>
+    </form>
+    {% endif %}
+  </div>
+</section>
+<section class="section-block" aria-labelledby="server-tools-title">
+  <div class="section-heading"><h2 id="server-tools-title">Discovered tools</h2></div>
+  {% if tools %}
+  <div class="table-wrap"><table><thead><tr><th scope="col">Tool</th><th scope="col">Description</th><th scope="col">State</th></tr></thead><tbody>
+    {% for tool in tools %}<tr>
+      <td><code>{{ tool.name }}</code></td>
+      <td class="wrap-text">{{ tool.description }}</td>
+      <td>{% if tool.active %}Active{% else %}Inactive{% endif %}</td>
+    </tr>{% endfor %}
+  </tbody></table></div>
+  {{ components.pagination(request, page, has_next) }}
+  {% else %}{{ components.empty_state('No discovered tools', 'Run discovery to catalog this server’s tools.') }}{% endif %}
+</section>

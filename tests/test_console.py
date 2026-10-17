@@ -1,7 +1,8 @@
 import re
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -9,8 +10,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coyote_mcp.app import app
-from coyote_mcp.auth import issue_browser_session
+from coyote_mcp.auth import (
+    authenticate_browser_session,
+    csrf_token_for,
+    issue_browser_session,
+)
 from coyote_mcp.db import get_session
+from coyote_mcp.discovery import DiscoveredTool, DiscoveryService
 from coyote_mcp.models import (
     BrowserSession,
     Collection,
@@ -721,3 +727,1556 @@ async def test_console_placeholder_pages_select_organization_and_enforce_page_rb
     assert "MCP Servers" in servers.text
     assert principals.status_code == 200
     assert forbidden.status_code == 403
+
+
+SERVER_LINK = r"/console/servers/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+
+
+class _FailingDiscoveryClient:
+    async def list_tools(self, endpoint: str) -> list[DiscoveredTool]:
+        raise TimeoutError(endpoint)
+
+
+@pytest.fixture
+def public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    def resolve(host: str, *args: object, **kwargs: object) -> list[tuple[object, ...]]:
+        address = "10.0.0.5" if host.startswith("internal.") else "93.184.216.34"
+        return [(None, None, None, None, (address, 0))]
+
+    monkeypatch.setattr("coyote_mcp.security.socket.getaddrinfo", resolve)
+
+
+@asynccontextmanager
+async def _console_client(
+    session_factory: async_sessionmaker[AsyncSession], cookie: str
+) -> AsyncIterator[httpx.AsyncClient]:
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", follow_redirects=False
+        ) as client:
+            client.cookies.set(Settings().browser_session_cookie_name, cookie)
+            yield client
+    finally:
+        app.dependency_overrides.clear()
+
+
+async def _csrf_for_cookie(session_factory: async_sessionmaker[AsyncSession], cookie: str) -> str:
+    async with session_factory() as session:
+        current = await authenticate_browser_session(session, cookie)
+        assert current is not None and current.browser_session is not None
+        return csrf_token_for(current.browser_session, Settings())
+
+
+async def _create_server(
+    session_factory: async_sessionmaker[AsyncSession],
+    organization_id: UUID,
+    name: str,
+    *,
+    endpoint: str = "https://downstream.example.test/mcp",
+    status: str = "ready",
+    last_sync_error: str | None = None,
+) -> UUID:
+    async with session_factory() as session:
+        server = MCPServer(
+            organization_id=organization_id,
+            name=name,
+            display_name=name.title(),
+            endpoint=endpoint,
+            status=status,
+            last_sync_error=last_sync_error,
+            last_synced_at=datetime.now(UTC),
+        )
+        session.add(server)
+        await session.commit()
+        return server.id
+
+
+async def _load_server(
+    session_factory: async_sessionmaker[AsyncSession], name: str
+) -> MCPServer | None:
+    async with session_factory() as session:
+        return await session.scalar(select(MCPServer).where(MCPServer.name == name))
+
+
+@pytest.mark.asyncio
+async def test_server_registry_is_organization_scoped_and_redacts_endpoints(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="viewer")
+    _, other_organization, _ = await _browser_session(session_factory, role="owner")
+    own_id = await _create_server(
+        session_factory,
+        organization.id,
+        "own-server",
+        endpoint="https://downstream.example.test/private/mcp?token=supersecret",
+    )
+    other_id = await _create_server(session_factory, other_organization.id, "other-org-server")
+
+    async with _console_client(session_factory, cookie) as client:
+        listing = await client.get("/console/servers")
+        detail = await client.get(f"/console/servers/{own_id}")
+        foreign = await client.get(f"/console/servers/{other_id}")
+
+    assert listing.status_code == 200
+    assert "own-server" in listing.text
+    assert "other-org-server" not in listing.text
+    assert detail.status_code == 200
+    assert "https://downstream.example.test/private/mcp" in detail.text
+    assert "supersecret" not in detail.text
+    assert foreign.status_code == 404
+    assert "other-org-server" not in foreign.text
+
+
+@pytest.mark.asyncio
+async def test_instance_admin_session_reads_servers_without_membership_role(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    admin_cookie, organization, _ = await _browser_session(
+        session_factory, role=None, instance_administrator=True
+    )
+    member_cookie, _, _ = await _browser_session(
+        session_factory, role=None, organization=organization
+    )
+    await _create_server(session_factory, organization.id, "admin-visible")
+
+    async with _console_client(session_factory, admin_cookie) as client:
+        admin_listing = await client.get("/console/servers")
+    async with _console_client(session_factory, member_cookie) as client:
+        member_listing = await client.get("/console/servers")
+
+    assert admin_listing.status_code == 200
+    assert "admin-visible" in admin_listing.text
+    assert member_listing.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_viewer_cannot_write_servers_even_with_valid_csrf_token(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="viewer")
+    server_id = await _create_server(session_factory, organization.id, "viewer-target")
+    token = await _csrf_for_cookie(session_factory, cookie)
+
+    async with _console_client(session_factory, cookie) as client:
+        register = await client.post(
+            "/console/servers",
+            data={
+                "csrf_token": token,
+                "name": "viewer-created",
+                "display_name": "Viewer created",
+                "endpoint": "https://downstream.example.test/mcp",
+            },
+        )
+        disable = await client.post(
+            f"/console/servers/{server_id}/enabled", data={"csrf_token": token, "enabled": "false"}
+        )
+        delete = await client.post(
+            f"/console/servers/{server_id}/delete", data={"csrf_token": token}
+        )
+
+    assert register.status_code == 403
+    assert disable.status_code == 403
+    assert delete.status_code == 403
+    assert await _load_server(session_factory, "viewer-created") is None
+    target = await _load_server(session_factory, "viewer-target")
+    assert target is not None
+    assert target.enabled is True
+
+
+@pytest.mark.asyncio
+async def test_server_writes_require_csrf_token(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="maintainer")
+    server_id = await _create_server(session_factory, organization.id, "csrf-target")
+
+    async with _console_client(session_factory, cookie) as client:
+        missing_token = await client.post(
+            f"/console/servers/{server_id}/enabled", data={"enabled": "false"}
+        )
+        forged_token = await client.post(
+            f"/console/servers/{server_id}/delete", data={"csrf_token": "forged"}
+        )
+        missing_create = await client.post(
+            "/console/servers",
+            data={
+                "name": "csrf-created",
+                "display_name": "CSRF created",
+                "endpoint": "https://downstream.example.test/mcp",
+            },
+        )
+
+    assert missing_token.status_code == 403
+    assert forged_token.status_code == 403
+    assert missing_create.status_code == 403
+    target = await _load_server(session_factory, "csrf-target")
+    assert target is not None
+    assert target.enabled is True
+    assert await _load_server(session_factory, "csrf-created") is None
+
+
+@pytest.mark.asyncio
+async def test_maintainer_registers_server_with_validated_endpoint(
+    session_factory: async_sessionmaker[AsyncSession], public_dns: None
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="maintainer")
+
+    async with _console_client(session_factory, cookie) as client:
+        form = await client.get("/console/servers/new")
+        response = await client.post(
+            "/console/servers",
+            data={
+                "csrf_token": _csrf_token(form),
+                "name": "registered-server",
+                "display_name": "Registered server",
+                "endpoint": "https://downstream.example.test/mcp",
+            },
+        )
+
+    server = await _load_server(session_factory, "registered-server")
+    assert server is not None
+    assert server.organization_id == organization.id
+    assert server.endpoint == "https://downstream.example.test/mcp"
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/console/servers/{server.id}"
+
+
+@pytest.mark.asyncio
+async def test_registration_rejects_unsafe_endpoints_and_duplicate_names(
+    session_factory: async_sessionmaker[AsyncSession], public_dns: None
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="maintainer")
+    await _create_server(session_factory, organization.id, "taken-server")
+
+    async with _console_client(session_factory, cookie) as client:
+        form = await client.get("/console/servers/new")
+        unsafe = await client.post(
+            "/console/servers",
+            data={
+                "csrf_token": _csrf_token(form),
+                "name": "unsafe-server",
+                "display_name": "Unsafe server",
+                "endpoint": "https://internal.example.test/mcp",
+            },
+        )
+        duplicate = await client.post(
+            "/console/servers",
+            data={
+                "csrf_token": _csrf_token(unsafe),
+                "name": "taken-server",
+                "display_name": "Taken server",
+                "endpoint": "https://downstream.example.test/mcp",
+            },
+        )
+
+    assert unsafe.status_code == 422
+    assert await _load_server(session_factory, "unsafe-server") is None
+    assert duplicate.status_code == 409
+    assert "already" in duplicate.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_discovery_failure_is_reported_on_server_detail(
+    session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="maintainer")
+    server_id = await _create_server(session_factory, organization.id, "flaky-server")
+    monkeypatch.setattr(
+        "coyote_mcp.catalog.get_discovery_service",
+        lambda settings: DiscoveryService(_FailingDiscoveryClient(), settings),
+    )
+
+    async with _console_client(session_factory, cookie) as client:
+        token = _csrf_token(await client.get(f"/console/servers/{server_id}"))
+        sync = await client.post(f"/console/servers/{server_id}/sync", data={"csrf_token": token})
+        detail = await client.get(f"/console/servers/{server_id}")
+
+    assert sync.status_code == 303
+    assert detail.status_code == 200
+    assert "badge-error" in detail.text
+    assert "Discovery failed." in detail.text
+    assert "downstream.example.test" in detail.text
+    assert "TimeoutError" not in detail.text
+
+
+@pytest.mark.asyncio
+async def test_owner_can_disable_and_enable_server(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="owner")
+    server_id = await _create_server(session_factory, organization.id, "toggled-server")
+
+    async with _console_client(session_factory, cookie) as client:
+        token = _csrf_token(await client.get(f"/console/servers/{server_id}"))
+        disabled = await client.post(
+            f"/console/servers/{server_id}/enabled", data={"csrf_token": token, "enabled": "false"}
+        )
+        detail = await client.get(f"/console/servers/{server_id}")
+        token = _csrf_token(detail)
+        invalid = await client.post(
+            f"/console/servers/{server_id}/enabled", data={"csrf_token": token, "enabled": "maybe"}
+        )
+        enabled = await client.post(
+            f"/console/servers/{server_id}/enabled", data={"csrf_token": token, "enabled": "true"}
+        )
+
+    assert disabled.status_code == 303
+    assert "Disabled" in detail.text
+    assert invalid.status_code == 422
+    assert enabled.status_code == 303
+    server = await _load_server(session_factory, "toggled-server")
+    assert server is not None
+    assert server.enabled is True
+
+
+@pytest.mark.asyncio
+async def test_edit_server_validates_endpoint_and_resets_discovery_state(
+    session_factory: async_sessionmaker[AsyncSession], public_dns: None
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="maintainer")
+    server_id = await _create_server(
+        session_factory,
+        organization.id,
+        "edited-server",
+        status="error",
+        last_sync_error="Discovery failed.",
+    )
+
+    async with _console_client(session_factory, cookie) as client:
+        form = await client.get(f"/console/servers/{server_id}/edit")
+        unsafe = await client.post(
+            f"/console/servers/{server_id}/edit",
+            data={
+                "csrf_token": _csrf_token(form),
+                "display_name": "Renamed server",
+                "endpoint": "https://internal.example.test/mcp",
+            },
+        )
+        valid = await client.post(
+            f"/console/servers/{server_id}/edit",
+            data={
+                "csrf_token": _csrf_token(unsafe),
+                "display_name": "Renamed server",
+                "endpoint": "https://replacement.example.test/mcp",
+            },
+        )
+
+    assert unsafe.status_code == 422
+    assert valid.status_code == 303
+    server = await _load_server(session_factory, "edited-server")
+    assert server is not None
+    assert server.endpoint == "https://replacement.example.test/mcp"
+    assert server.display_name == "Renamed server"
+    assert server.status == "pending"
+    assert server.last_sync_error is None
+
+
+@pytest.mark.asyncio
+async def test_server_delete_is_refused_while_collections_reference_it(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="owner")
+    server_id = await _create_server(session_factory, organization.id, "referenced-server")
+    async with session_factory() as session:
+        collection = Collection(
+            organization_id=organization.id,
+            slug="referenced-collection",
+            display_name="Referenced collection",
+        )
+        session.add(collection)
+        await session.flush()
+        collection_id = collection.id
+        session.add(
+            CollectionMembership(
+                collection_id=collection_id, server_id=server_id, organization_id=organization.id
+            )
+        )
+        await session.commit()
+
+    async with _console_client(session_factory, cookie) as client:
+        token = _csrf_token(await client.get(f"/console/servers/{server_id}"))
+        refused = await client.post(
+            f"/console/servers/{server_id}/delete", data={"csrf_token": token}
+        )
+        assert await _load_server(session_factory, "referenced-server") is not None
+
+        async with session_factory() as session:
+            membership = await session.get(CollectionMembership, (collection_id, server_id))
+            assert membership is not None
+            await session.delete(membership)
+            await session.commit()
+
+        token = _csrf_token(await client.get(f"/console/servers/{server_id}"))
+        deleted = await client.post(
+            f"/console/servers/{server_id}/delete", data={"csrf_token": token}
+        )
+
+    assert refused.status_code == 409
+    assert "Remove this server from all collections" in refused.text
+    assert deleted.status_code == 303
+    assert deleted.headers["location"] == "/console/servers"
+    assert await _load_server(session_factory, "referenced-server") is None
+
+
+@pytest.mark.asyncio
+async def test_server_registry_pages_results(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="viewer")
+    for index in range(26):
+        await _create_server(session_factory, organization.id, f"paged-{index:02d}")
+
+    async with _console_client(session_factory, cookie) as client:
+        first = await client.get("/console/servers")
+        second = await client.get("/console/servers?page=2")
+
+    first_links = set(re.findall(SERVER_LINK, first.text))
+    second_links = set(re.findall(SERVER_LINK, second.text))
+    assert len(first_links) == 25
+    assert len(second_links) == 1
+    assert first_links.isdisjoint(second_links)
+
+
+COLLECTION_LINK = (
+    r"/console/collections/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+)
+
+
+async def _create_collection(
+    session_factory: async_sessionmaker[AsyncSession],
+    organization_id: UUID,
+    slug: str,
+    *,
+    enabled: bool = True,
+) -> UUID:
+    async with session_factory() as session:
+        collection = Collection(
+            organization_id=organization_id,
+            slug=slug,
+            display_name=slug.title(),
+            enabled=enabled,
+        )
+        session.add(collection)
+        await session.commit()
+        return collection.id
+
+
+async def _create_tool(
+    session_factory: async_sessionmaker[AsyncSession],
+    server_id: UUID,
+    name: str,
+    *,
+    description: str | None = None,
+) -> UUID:
+    async with session_factory() as session:
+        tool = Tool(
+            server_id=server_id,
+            name=name,
+            description=description or f"{name} description",
+            input_schema={},
+            fingerprint=uuid4().hex,
+            active=True,
+            last_seen_at=datetime.now(UTC),
+        )
+        session.add(tool)
+        await session.commit()
+        return tool.id
+
+
+async def _membership_exists(
+    session_factory: async_sessionmaker[AsyncSession], collection_id: UUID, server_id: UUID
+) -> bool:
+    async with session_factory() as session:
+        return await session.get(CollectionMembership, (collection_id, server_id)) is not None
+
+
+async def _load_collection(
+    session_factory: async_sessionmaker[AsyncSession], slug: str
+) -> Collection | None:
+    async with session_factory() as session:
+        return await session.scalar(select(Collection).where(Collection.slug == slug))
+
+
+@pytest.mark.asyncio
+async def test_collections_are_organization_scoped_and_show_endpoint(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="viewer")
+    _, other_organization, _ = await _browser_session(session_factory, role="owner")
+    own_id = await _create_collection(session_factory, organization.id, "own-collection")
+    other_id = await _create_collection(session_factory, other_organization.id, "other-collection")
+
+    async with _console_client(session_factory, cookie) as client:
+        listing = await client.get("/console/collections")
+        detail = await client.get(f"/console/collections/{own_id}")
+        foreign = await client.get(f"/console/collections/{other_id}")
+
+    assert listing.status_code == 200
+    assert "own-collection" in listing.text
+    assert "other-collection" not in listing.text
+    assert "Create collection" not in listing.text
+    assert detail.status_code == 200
+    assert "/mcp/collections/own-collection" in detail.text
+    assert foreign.status_code == 404
+    assert "other-collection" not in foreign.text
+
+
+@pytest.mark.asyncio
+async def test_instance_admin_reads_collections_without_membership_role(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    admin_cookie, organization, _ = await _browser_session(
+        session_factory, role=None, instance_administrator=True
+    )
+    member_cookie, _, _ = await _browser_session(
+        session_factory, role=None, organization=organization
+    )
+    await _create_collection(session_factory, organization.id, "admin-visible-collection")
+
+    async with _console_client(session_factory, admin_cookie) as client:
+        admin_listing = await client.get("/console/collections")
+    async with _console_client(session_factory, member_cookie) as client:
+        member_listing = await client.get("/console/collections")
+
+    assert admin_listing.status_code == 200
+    assert "admin-visible-collection" in admin_listing.text
+    assert member_listing.status_code == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["viewer", "consumer"])
+async def test_read_only_roles_cannot_write_collections(
+    session_factory: async_sessionmaker[AsyncSession], role: str
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role=role)
+    server_id = await _create_server(session_factory, organization.id, f"{role}-server")
+    collection_id = await _create_collection(session_factory, organization.id, f"{role}-target")
+    token = await _csrf_for_cookie(session_factory, cookie)
+
+    async with _console_client(session_factory, cookie) as client:
+        create = await client.post(
+            "/console/collections",
+            data={
+                "csrf_token": token,
+                "slug": f"{role}-created",
+                "display_name": "Created",
+                "exposure_mode": "discovery",
+            },
+        )
+        edit = await client.post(
+            f"/console/collections/{collection_id}/edit",
+            data={"csrf_token": token, "display_name": "Renamed", "description": ""},
+        )
+        disable = await client.post(
+            f"/console/collections/{collection_id}/enabled",
+            data={"csrf_token": token, "enabled": "false"},
+        )
+        add = await client.post(
+            f"/console/collections/{collection_id}/servers",
+            data={"csrf_token": token, "server_id": str(server_id)},
+        )
+
+    assert create.status_code == 403
+    assert edit.status_code == 403
+    assert disable.status_code == 403
+    assert add.status_code == 403
+    assert await _load_collection(session_factory, f"{role}-created") is None
+    target = await _load_collection(session_factory, f"{role}-target")
+    assert target is not None
+    assert target.enabled is True
+    assert target.display_name == f"{role}-target".title()
+    assert not await _membership_exists(session_factory, collection_id, server_id)
+
+
+@pytest.mark.asyncio
+async def test_collection_writes_require_csrf_token(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="maintainer")
+    collection_id = await _create_collection(session_factory, organization.id, "csrf-collection")
+
+    async with _console_client(session_factory, cookie) as client:
+        missing_create = await client.post(
+            "/console/collections",
+            data={"slug": "no-token", "display_name": "No token", "exposure_mode": "discovery"},
+        )
+        forged_disable = await client.post(
+            f"/console/collections/{collection_id}/enabled",
+            data={"csrf_token": "forged", "enabled": "false"},
+        )
+
+    assert missing_create.status_code == 403
+    assert forged_disable.status_code == 403
+    assert await _load_collection(session_factory, "no-token") is None
+    target = await _load_collection(session_factory, "csrf-collection")
+    assert target is not None
+    assert target.enabled is True
+
+
+@pytest.mark.asyncio
+async def test_collection_create_and_edit_validate_input_and_conflicts(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="maintainer")
+    await _create_collection(session_factory, organization.id, "taken-slug")
+
+    async with _console_client(session_factory, cookie) as client:
+        form = await client.get("/console/collections/new")
+        created = await client.post(
+            "/console/collections",
+            data={
+                "csrf_token": _csrf_token(form),
+                "slug": "fresh-slug",
+                "display_name": "Fresh",
+                "description": "Downstream tools for finance",
+                "exposure_mode": "native",
+            },
+        )
+        invalid_slug = await client.post(
+            "/console/collections",
+            data={
+                "csrf_token": _csrf_token(await client.get("/console/collections/new")),
+                "slug": "Not A Slug",
+                "display_name": "Invalid",
+                "exposure_mode": "discovery",
+            },
+        )
+        duplicate = await client.post(
+            "/console/collections",
+            data={
+                "csrf_token": _csrf_token(await client.get("/console/collections/new")),
+                "slug": "taken-slug",
+                "display_name": "Duplicate",
+                "exposure_mode": "discovery",
+            },
+        )
+
+        fresh = await _load_collection(session_factory, "fresh-slug")
+        assert fresh is not None
+        edit_form = await client.get(f"/console/collections/{fresh.id}/edit")
+        edited = await client.post(
+            f"/console/collections/{fresh.id}/edit",
+            data={
+                "csrf_token": _csrf_token(edit_form),
+                "display_name": "Renamed",
+                "description": "Updated",
+                "exposure_mode": "discovery",
+            },
+        )
+        bad_mode = await client.post(
+            f"/console/collections/{fresh.id}/edit",
+            data={
+                "csrf_token": _csrf_token(
+                    await client.get(f"/console/collections/{fresh.id}/edit")
+                ),
+                "display_name": "Renamed",
+                "description": "",
+                "exposure_mode": "bogus",
+            },
+        )
+
+    assert created.status_code == 303
+    assert invalid_slug.status_code == 422
+    assert duplicate.status_code == 409
+    assert "already exists" in duplicate.text.lower()
+    assert edited.status_code == 303
+    assert bad_mode.status_code == 422
+    reloaded = await _load_collection(session_factory, "fresh-slug")
+    assert reloaded is not None
+    assert reloaded.display_name == "Renamed"
+    assert reloaded.description == "Updated"
+    assert reloaded.exposure_mode == "discovery"
+    assert await _load_collection(session_factory, "not a slug") is None
+
+
+@pytest.mark.asyncio
+async def test_collection_membership_updates_are_validated_and_isolated(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="maintainer")
+    _, other_organization, _ = await _browser_session(session_factory, role="owner")
+    collection_id = await _create_collection(session_factory, organization.id, "members")
+    server_id = await _create_server(session_factory, organization.id, "member-server")
+    foreign_server_id = await _create_server(
+        session_factory, other_organization.id, "foreign-member-server"
+    )
+
+    detail_path = f"/console/collections/{collection_id}"
+    members_path = f"{detail_path}/servers"
+    async with _console_client(session_factory, cookie) as client:
+        added = await client.post(
+            members_path,
+            data={
+                "csrf_token": _csrf_token(await client.get(detail_path)),
+                "server_id": str(server_id),
+            },
+        )
+        assert added.status_code == 303
+        assert await _membership_exists(session_factory, collection_id, server_id)
+
+        duplicate = await client.post(
+            members_path,
+            data={
+                "csrf_token": _csrf_token(await client.get(detail_path)),
+                "server_id": str(server_id),
+            },
+        )
+        malformed = await client.post(
+            members_path,
+            data={
+                "csrf_token": _csrf_token(await client.get(detail_path)),
+                "server_id": "not-a-uuid",
+            },
+        )
+        foreign = await client.post(
+            members_path,
+            data={
+                "csrf_token": _csrf_token(await client.get(detail_path)),
+                "server_id": str(foreign_server_id),
+            },
+        )
+        assert not await _membership_exists(session_factory, collection_id, foreign_server_id)
+
+        detail = await client.get(detail_path)
+        assert "member-server" in detail.text
+        assert "foreign-member-server" not in detail.text
+
+        removed = await client.post(
+            f"{members_path}/{server_id}/remove",
+            data={"csrf_token": _csrf_token(detail)},
+        )
+
+    assert duplicate.status_code == 409
+    assert malformed.status_code == 422
+    assert foreign.status_code == 422
+    assert "Choose a server from this organization." in foreign.text
+    assert removed.status_code == 303
+    assert not await _membership_exists(session_factory, collection_id, server_id)
+
+
+@pytest.mark.asyncio
+async def test_disabled_collection_hides_available_tools_until_enabled(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="owner")
+    server_id = await _create_server(session_factory, organization.id, "tool-server")
+    await _create_tool(session_factory, server_id, "alpha-tool")
+    collection_id = await _create_collection(session_factory, organization.id, "toggle")
+    async with session_factory() as session:
+        session.add(
+            CollectionMembership(
+                collection_id=collection_id, server_id=server_id, organization_id=organization.id
+            )
+        )
+        await session.commit()
+
+    async with _console_client(session_factory, cookie) as client:
+        before = await client.get(f"/console/collections/{collection_id}")
+        disabled = await client.post(
+            f"/console/collections/{collection_id}/enabled",
+            data={"csrf_token": _csrf_token(before), "enabled": "false"},
+        )
+        during = await client.get(f"/console/collections/{collection_id}")
+        enabled = await client.post(
+            f"/console/collections/{collection_id}/enabled",
+            data={"csrf_token": _csrf_token(during), "enabled": "true"},
+        )
+        after = await client.get(f"/console/collections/{collection_id}")
+
+    assert "alpha-tool" in before.text
+    assert disabled.status_code == 303
+    assert "alpha-tool" not in during.text
+    assert "no tools are listed" in during.text
+    assert enabled.status_code == 303
+    assert "alpha-tool" in after.text
+
+
+@pytest.mark.asyncio
+async def test_published_tools_are_limited_to_collection_editors_and_escaped(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    owner_cookie, organization, _ = await _browser_session(session_factory, role="owner")
+    viewer_cookie, _, _ = await _browser_session(
+        session_factory, role="viewer", organization=organization
+    )
+    server_id = await _create_server(session_factory, organization.id, "publish-server")
+    tool_id = await _create_tool(
+        session_factory,
+        server_id,
+        "risky-tool",
+        description="<script>alert('downstream')</script>",
+    )
+    collection_id = await _create_collection(session_factory, organization.id, "published")
+    async with session_factory() as session:
+        session.add(
+            CollectionMembership(
+                collection_id=collection_id, server_id=server_id, organization_id=organization.id
+            )
+        )
+        session.add(
+            CollectionToolPublication(
+                collection_id=collection_id,
+                server_id=server_id,
+                tool_id=tool_id,
+                enabled=True,
+                published_name="risky-alias",
+            )
+        )
+        await session.commit()
+
+    async with _console_client(session_factory, owner_cookie) as client:
+        owner_detail = await client.get(f"/console/collections/{collection_id}")
+    async with _console_client(session_factory, viewer_cookie) as client:
+        viewer_detail = await client.get(f"/console/collections/{collection_id}")
+
+    assert owner_detail.status_code == 200
+    assert "risky-alias" in owner_detail.text
+    assert "<script>alert" not in owner_detail.text
+    assert "&lt;script&gt;" in owner_detail.text
+    assert viewer_detail.status_code == 200
+    assert "risky-tool" in viewer_detail.text
+    assert "risky-alias" not in viewer_detail.text
+    assert "Published tools" not in viewer_detail.text
+
+
+@pytest.mark.asyncio
+async def test_collection_list_pages_results(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="viewer")
+    for index in range(26):
+        await _create_collection(session_factory, organization.id, f"paged-collection-{index:02d}")
+
+    async with _console_client(session_factory, cookie) as client:
+        first = await client.get("/console/collections")
+        second = await client.get("/console/collections?page=2")
+
+    first_links = set(re.findall(COLLECTION_LINK, first.text))
+    second_links = set(re.findall(COLLECTION_LINK, second.text))
+    assert len(first_links) == 25
+    assert len(second_links) == 1
+    assert first_links.isdisjoint(second_links)
+
+
+async def _join_collection(
+    session_factory: async_sessionmaker[AsyncSession],
+    collection_id: UUID,
+    server_id: UUID,
+    organization_id: UUID,
+) -> None:
+    async with session_factory() as session:
+        session.add(
+            CollectionMembership(
+                collection_id=collection_id, server_id=server_id, organization_id=organization_id
+            )
+        )
+        await session.commit()
+
+
+async def _publish_directly(
+    session_factory: async_sessionmaker[AsyncSession],
+    collection_id: UUID,
+    server_id: UUID,
+    tool_id: UUID,
+    published_name: str,
+    *,
+    description_override: str | None = None,
+) -> UUID:
+    async with session_factory() as session:
+        publication = CollectionToolPublication(
+            collection_id=collection_id,
+            server_id=server_id,
+            tool_id=tool_id,
+            enabled=True,
+            published_name=published_name,
+            description_override=description_override,
+        )
+        session.add(publication)
+        await session.commit()
+        return publication.id
+
+
+async def _load_publications(
+    session_factory: async_sessionmaker[AsyncSession], collection_id: UUID
+) -> list[CollectionToolPublication]:
+    async with session_factory() as session:
+        result = await session.scalars(
+            select(CollectionToolPublication)
+            .where(CollectionToolPublication.collection_id == collection_id)
+            .order_by(CollectionToolPublication.published_name)
+        )
+        return list(result)
+
+
+async def _fresh_token(client: httpx.AsyncClient, path: str) -> str:
+    return _csrf_token(await client.get(path))
+
+
+@pytest.mark.asyncio
+async def test_publication_lifecycle_publishes_edits_and_unpublishes(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="owner")
+    server_id = await _create_server(session_factory, organization.id, "lifecycle-server")
+    tool_id = await _create_tool(session_factory, server_id, "lookup-tool")
+    collection_id = await _create_collection(session_factory, organization.id, "lifecycle")
+    await _join_collection(session_factory, collection_id, server_id, organization.id)
+    listing_path = f"/console/collections/{collection_id}/publications"
+
+    async with _console_client(session_factory, cookie) as client:
+        before = await client.get(listing_path)
+        published = await client.post(
+            listing_path,
+            data={
+                "csrf_token": _csrf_token(before),
+                "tool_id": str(tool_id),
+                "published_name": "lookup-alias",
+            },
+        )
+
+    assert before.status_code == 200
+    assert "lookup-tool" in before.text
+    assert published.status_code == 303
+    assert published.headers["location"] == listing_path
+    [publication] = await _load_publications(session_factory, collection_id)
+    assert publication.tool_id == tool_id
+    assert publication.published_name == "lookup-alias"
+    assert publication.enabled is True
+    edit_path = f"{listing_path}/{publication.id}/edit"
+
+    async with _console_client(session_factory, cookie) as client:
+        form = await client.get(edit_path)
+        updated = await client.post(
+            edit_path,
+            data={
+                "csrf_token": _csrf_token(form),
+                "published_name": "renamed-alias",
+                "description_override": "Looks up issues.",
+                "enabled": "false",
+            },
+        )
+
+    assert form.status_code == 200
+    assert 'value="lookup-alias"' in form.text
+    assert updated.status_code == 303
+    [publication] = await _load_publications(session_factory, collection_id)
+    assert publication.published_name == "renamed-alias"
+    assert publication.description_override == "Looks up issues."
+    assert publication.enabled is False
+
+    async with _console_client(session_factory, cookie) as client:
+        listing = await client.get(listing_path)
+        removed = await client.post(
+            f"{listing_path}/{publication.id}/remove",
+            data={"csrf_token": _csrf_token(listing)},
+        )
+
+    assert removed.status_code == 303
+    assert await _load_publications(session_factory, collection_id) == []
+
+
+@pytest.mark.asyncio
+async def test_disabled_collection_publications_page_warns_without_hiding_publications(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="owner")
+    server_id = await _create_server(session_factory, organization.id, "disabled-server")
+    tool_id = await _create_tool(session_factory, server_id, "disabled-tool")
+    collection_id = await _create_collection(
+        session_factory, organization.id, "disabled-publications", enabled=False
+    )
+    await _join_collection(session_factory, collection_id, server_id, organization.id)
+    await _publish_directly(session_factory, collection_id, server_id, tool_id, "disabled-alias")
+
+    async with _console_client(session_factory, cookie) as client:
+        page = await client.get(f"/console/collections/{collection_id}/publications")
+
+    assert page.status_code == 200
+    assert "This collection is disabled." in page.text
+    assert "disabled-alias" in page.text
+
+
+@pytest.mark.asyncio
+async def test_publication_alias_and_tool_conflicts_are_rejected(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="owner")
+    server_id = await _create_server(session_factory, organization.id, "conflict-server")
+    taken_tool_id = await _create_tool(session_factory, server_id, "taken-tool")
+    free_tool_id = await _create_tool(session_factory, server_id, "free-tool")
+    orphan_server_id = await _create_server(session_factory, organization.id, "orphan-server")
+    orphan_tool_id = await _create_tool(session_factory, orphan_server_id, "orphan-tool")
+    collection_id = await _create_collection(session_factory, organization.id, "conflicts")
+    await _join_collection(session_factory, collection_id, server_id, organization.id)
+    await _publish_directly(session_factory, collection_id, server_id, taken_tool_id, "taken-name")
+    base = f"/console/collections/{collection_id}/publications"
+
+    async with _console_client(session_factory, cookie) as client:
+        name_conflict = await client.post(
+            base,
+            data={
+                "csrf_token": await _fresh_token(client, base),
+                "tool_id": str(free_tool_id),
+                "published_name": "taken-name",
+            },
+        )
+        tool_conflict = await client.post(
+            base,
+            data={
+                "csrf_token": await _fresh_token(client, base),
+                "tool_id": str(taken_tool_id),
+                "published_name": "other-name",
+            },
+        )
+        invalid_name = await client.post(
+            base,
+            data={
+                "csrf_token": await _fresh_token(client, base),
+                "tool_id": str(free_tool_id),
+                "published_name": "bad name!",
+            },
+        )
+        invalid_tool = await client.post(
+            base,
+            data={
+                "csrf_token": await _fresh_token(client, base),
+                "tool_id": "not-a-uuid",
+                "published_name": "free-name",
+            },
+        )
+        outside_membership = await client.post(
+            base,
+            data={
+                "csrf_token": await _fresh_token(client, base),
+                "tool_id": str(orphan_tool_id),
+                "published_name": "free-name",
+            },
+        )
+
+    assert name_conflict.status_code == 409
+    assert "That published name is already used in this collection." in name_conflict.text
+    assert tool_conflict.status_code == 409
+    assert "This tool is already published in this collection." in tool_conflict.text
+    assert invalid_name.status_code == 422
+    assert "starting with a letter or digit." in invalid_name.text
+    assert invalid_tool.status_code == 422
+    assert outside_membership.status_code == 422
+    assert "Choose a tool that is available in this collection." in invalid_tool.text
+    assert "Choose a tool that is available in this collection." in outside_membership.text
+    publications = await _load_publications(session_factory, collection_id)
+    assert [publication.published_name for publication in publications] == ["taken-name"]
+
+
+@pytest.mark.asyncio
+async def test_newly_discovered_tools_default_to_unpublished(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="owner")
+    server_id = await _create_server(session_factory, organization.id, "default-deny-server")
+    collection_id = await _create_collection(session_factory, organization.id, "default-deny")
+    await _join_collection(session_factory, collection_id, server_id, organization.id)
+    for index in range(26):
+        await _create_tool(session_factory, server_id, f"bulk-tool-{index:02d}")
+
+    base = f"/console/collections/{collection_id}/publications"
+    async with _console_client(session_factory, cookie) as client:
+        first = await client.get(base)
+        second = await client.get(f"{base}?page=2")
+        catalog_page = await client.get("/console/tools")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(re.findall(r'name="tool_id"', first.text)) == 25
+    assert len(re.findall(r'name="tool_id"', second.text)) == 1
+    assert "bulk-tool-00" in first.text
+    assert "Unpublished" in first.text
+    assert catalog_page.status_code == 200
+    assert "Unpublished" in catalog_page.text
+    assert await _load_publications(session_factory, collection_id) == []
+
+
+@pytest.mark.asyncio
+async def test_published_tools_are_paginated(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="owner")
+    server_id = await _create_server(session_factory, organization.id, "paged-publication-server")
+    collection_id = await _create_collection(session_factory, organization.id, "paged-published")
+    await _join_collection(session_factory, collection_id, server_id, organization.id)
+    for index in range(26):
+        tool_id = await _create_tool(session_factory, server_id, f"paged-tool-{index:02d}")
+        await _publish_directly(
+            session_factory, collection_id, server_id, tool_id, f"paged-alias-{index:02d}"
+        )
+
+    base = f"/console/collections/{collection_id}/publications"
+    remove_form = r'/publications/[0-9a-f-]{36}/remove"'
+    async with _console_client(session_factory, cookie) as client:
+        first = await client.get(base)
+        second = await client.get(f"{base}?published_page=2")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(re.findall(remove_form, first.text)) == 25
+    assert len(re.findall(remove_form, second.text)) == 1
+
+
+@pytest.mark.asyncio
+async def test_publication_writes_require_collection_update_and_csrf(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    maintainer_cookie, organization, _ = await _browser_session(session_factory, role="maintainer")
+    viewer_cookie, _, _ = await _browser_session(
+        session_factory, role="viewer", organization=organization
+    )
+    consumer_cookie, _, _ = await _browser_session(
+        session_factory, role="consumer", organization=organization
+    )
+    server_id = await _create_server(session_factory, organization.id, "guarded-server")
+    guarded_tool_id = await _create_tool(session_factory, server_id, "guarded-tool")
+    second_tool_id = await _create_tool(session_factory, server_id, "second-tool")
+    collection_id = await _create_collection(session_factory, organization.id, "guarded")
+    await _join_collection(session_factory, collection_id, server_id, organization.id)
+    publication_id = await _publish_directly(
+        session_factory, collection_id, server_id, guarded_tool_id, "guarded-alias"
+    )
+    base = f"/console/collections/{collection_id}/publications"
+    edit_path = f"{base}/{publication_id}/edit"
+    remove_path = f"{base}/{publication_id}/remove"
+
+    async with _console_client(session_factory, viewer_cookie) as client:
+        viewer_page = await client.get(base)
+        viewer_publish = await client.post(
+            base,
+            data={
+                "csrf_token": await _csrf_for_cookie(session_factory, viewer_cookie),
+                "tool_id": str(second_tool_id),
+                "published_name": "viewer-alias",
+            },
+        )
+        viewer_update = await client.post(
+            edit_path,
+            data={
+                "csrf_token": await _csrf_for_cookie(session_factory, viewer_cookie),
+                "published_name": "viewer-rename",
+                "enabled": "true",
+            },
+        )
+        viewer_remove = await client.post(
+            remove_path,
+            data={"csrf_token": await _csrf_for_cookie(session_factory, viewer_cookie)},
+        )
+    async with _console_client(session_factory, consumer_cookie) as client:
+        consumer_page = await client.get(base)
+
+    assert viewer_page.status_code == 403
+    assert viewer_publish.status_code == 403
+    assert viewer_update.status_code == 403
+    assert viewer_remove.status_code == 403
+    assert consumer_page.status_code == 403
+
+    async with _console_client(session_factory, maintainer_cookie) as client:
+        forged_publish = await client.post(
+            base,
+            data={
+                "csrf_token": "forged",
+                "tool_id": str(second_tool_id),
+                "published_name": "forged-alias",
+            },
+        )
+        forged_update = await client.post(
+            edit_path,
+            data={"csrf_token": "forged", "published_name": "forged-rename", "enabled": "true"},
+        )
+        missing_remove = await client.post(remove_path, data={})
+        forged_remove = await client.post(remove_path, data={"csrf_token": "forged"})
+        published = await client.post(
+            base,
+            data={
+                "csrf_token": await _csrf_for_cookie(session_factory, maintainer_cookie),
+                "tool_id": str(second_tool_id),
+                "published_name": "maintainer-alias",
+            },
+        )
+
+    assert forged_publish.status_code == 403
+    assert forged_update.status_code == 403
+    assert missing_remove.status_code == 403
+    assert forged_remove.status_code == 403
+    assert published.status_code == 303
+    publications = await _load_publications(session_factory, collection_id)
+    assert [publication.published_name for publication in publications] == [
+        "guarded-alias",
+        "maintainer-alias",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_publication_routes_are_organization_scoped(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="owner")
+    _, other_organization, _ = await _browser_session(session_factory, role="owner")
+    foreign_server_id = await _create_server(session_factory, other_organization.id, "foreign-srv")
+    foreign_tool_id = await _create_tool(session_factory, foreign_server_id, "foreign-tool")
+    foreign_collection_id = await _create_collection(
+        session_factory, other_organization.id, "foreign-collection"
+    )
+    await _join_collection(
+        session_factory, foreign_collection_id, foreign_server_id, other_organization.id
+    )
+    foreign_publication_id = await _publish_directly(
+        session_factory,
+        foreign_collection_id,
+        foreign_server_id,
+        foreign_tool_id,
+        "foreign-alias",
+    )
+    own_server_id = await _create_server(session_factory, organization.id, "own-srv")
+    own_tool_id = await _create_tool(session_factory, own_server_id, "own-tool")
+    own_collection_id = await _create_collection(session_factory, organization.id, "own-collection")
+    await _join_collection(session_factory, own_collection_id, own_server_id, organization.id)
+    own_publication_id = await _publish_directly(
+        session_factory, own_collection_id, own_server_id, own_tool_id, "own-alias"
+    )
+    foreign_base = f"/console/collections/{foreign_collection_id}/publications"
+    own_base = f"/console/collections/{own_collection_id}/publications"
+
+    async with _console_client(session_factory, cookie) as client:
+        page = await client.get(foreign_base)
+        edit = await client.get(f"{foreign_base}/{foreign_publication_id}/edit")
+        publish = await client.post(
+            foreign_base,
+            data={
+                "csrf_token": await _fresh_token(client, own_base),
+                "tool_id": str(own_tool_id),
+                "published_name": "stolen",
+            },
+        )
+        update = await client.post(
+            f"{foreign_base}/{foreign_publication_id}/edit",
+            data={
+                "csrf_token": await _fresh_token(client, own_base),
+                "published_name": "hijacked",
+                "enabled": "true",
+            },
+        )
+        cross_update = await client.post(
+            f"{foreign_base}/{own_publication_id}/edit",
+            data={
+                "csrf_token": await _fresh_token(client, own_base),
+                "published_name": "hijacked",
+                "enabled": "true",
+            },
+        )
+        remove = await client.post(
+            f"{foreign_base}/{foreign_publication_id}/remove",
+            data={"csrf_token": await _fresh_token(client, own_base)},
+        )
+        foreign_tool = await client.post(
+            own_base,
+            data={
+                "csrf_token": await _fresh_token(client, own_base),
+                "tool_id": str(foreign_tool_id),
+                "published_name": "borrowed",
+            },
+        )
+
+    assert page.status_code == 404
+    assert edit.status_code == 404
+    assert publish.status_code == 404
+    assert update.status_code == 404
+    assert cross_update.status_code == 404
+    assert remove.status_code == 404
+    assert foreign_tool.status_code == 422
+    foreign_names = [
+        p.published_name for p in await _load_publications(session_factory, foreign_collection_id)
+    ]
+    own_names = [
+        p.published_name for p in await _load_publications(session_factory, own_collection_id)
+    ]
+    assert foreign_names == ["foreign-alias"]
+    assert own_names == ["own-alias"]
+
+
+@pytest.mark.asyncio
+async def test_publications_respect_instance_admin_and_member_roles(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    admin_cookie, organization, _ = await _browser_session(
+        session_factory, role=None, instance_administrator=True
+    )
+    member_cookie, _, _ = await _browser_session(
+        session_factory, role=None, organization=organization
+    )
+    server_id = await _create_server(session_factory, organization.id, "admin-server")
+    tool_id = await _create_tool(session_factory, server_id, "admin-tool")
+    collection_id = await _create_collection(session_factory, organization.id, "admin-managed")
+    await _join_collection(session_factory, collection_id, server_id, organization.id)
+    base = f"/console/collections/{collection_id}/publications"
+
+    async with _console_client(session_factory, admin_cookie) as client:
+        admin_page = await client.get(base)
+        admin_publish = await client.post(
+            base,
+            data={
+                "csrf_token": await _csrf_for_cookie(session_factory, admin_cookie),
+                "tool_id": str(tool_id),
+                "published_name": "admin-alias",
+            },
+        )
+    async with _console_client(session_factory, member_cookie) as client:
+        member_page = await client.get(base)
+        member_catalog = await client.get("/console/tools")
+
+    assert admin_page.status_code == 200
+    assert admin_publish.status_code == 303
+    assert member_page.status_code == 403
+    assert member_catalog.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_tool_catalog_shows_publication_state_only_to_collection_editors(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    owner_cookie, organization, _ = await _browser_session(session_factory, role="owner")
+    viewer_cookie, _, _ = await _browser_session(
+        session_factory, role="viewer", organization=organization
+    )
+    server_id = await _create_server(session_factory, organization.id, "catalog-server")
+    published_tool_id = await _create_tool(
+        session_factory,
+        server_id,
+        "catalog-published",
+        description="<script>alert('catalog')</script>",
+    )
+    await _create_tool(session_factory, server_id, "catalog-unpublished")
+    collection_id = await _create_collection(session_factory, organization.id, "catalog")
+    await _join_collection(session_factory, collection_id, server_id, organization.id)
+    await _publish_directly(
+        session_factory, collection_id, server_id, published_tool_id, "catalog-alias"
+    )
+
+    async with _console_client(session_factory, owner_cookie) as client:
+        owner_catalog = await client.get("/console/tools")
+    async with _console_client(session_factory, viewer_cookie) as client:
+        viewer_catalog = await client.get("/console/tools")
+
+    assert owner_catalog.status_code == 200
+    assert "Published in 1 collection" in owner_catalog.text
+    assert "Unpublished" in owner_catalog.text
+    assert "<script>alert" not in owner_catalog.text
+    assert "catalog-unpublished" in owner_catalog.text
+    assert viewer_catalog.status_code == 200
+    assert "catalog-unpublished" in viewer_catalog.text
+    assert "Published in" not in viewer_catalog.text
+    assert "badge-unpublished" not in viewer_catalog.text
+
+
+@pytest.mark.asyncio
+async def test_publication_conflicts_from_constraints_keep_state_and_rerender(
+    session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="owner")
+    server_id = await _create_server(session_factory, organization.id, "constraint-server")
+    keep_tool_id = await _create_tool(session_factory, server_id, "keep-tool")
+    edit_tool_id = await _create_tool(session_factory, server_id, "edit-tool")
+    create_tool_id = await _create_tool(session_factory, server_id, "create-tool")
+    collection_id = await _create_collection(session_factory, organization.id, "constraints")
+    await _join_collection(session_factory, collection_id, server_id, organization.id)
+    await _publish_directly(session_factory, collection_id, server_id, keep_tool_id, "keep-name")
+    edit_id = await _publish_directly(
+        session_factory, collection_id, server_id, edit_tool_id, "edit-name"
+    )
+    base = f"/console/collections/{collection_id}/publications"
+    edit_path = f"{base}/{edit_id}/edit"
+
+    async def skip_availability_check(*args: object, **kwargs: object) -> None:
+        return None
+
+    # Bypass the pre-check so the database unique constraints are what reject the write.
+    monkeypatch.setattr("coyote_mcp.catalog._ensure_publication_available", skip_availability_check)
+
+    async with _console_client(session_factory, cookie) as client:
+        update = await client.post(
+            edit_path,
+            data={
+                "csrf_token": await _fresh_token(client, edit_path),
+                "published_name": "keep-name",
+                "description_override": "",
+                "enabled": "true",
+            },
+        )
+        form = await client.get(edit_path)
+        create = await client.post(
+            base,
+            data={
+                "csrf_token": await _fresh_token(client, base),
+                "tool_id": str(create_tool_id),
+                "published_name": "keep-name",
+            },
+        )
+        listing = await client.get(base)
+
+    assert update.status_code == 409
+    assert "A publication already uses that published name." in update.text
+    assert form.status_code == 200
+    assert 'value="edit-name"' in form.text
+    assert create.status_code == 409
+    assert "A publication already uses that tool or published name." in create.text
+    assert listing.status_code == 200
+    publications = await _load_publications(session_factory, collection_id)
+    assert [publication.published_name for publication in publications] == [
+        "edit-name",
+        "keep-name",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_removing_missing_publication_reports_not_found(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="owner")
+    collection_id = await _create_collection(session_factory, organization.id, "missing-remove")
+    base = f"/console/collections/{collection_id}/publications"
+
+    csrf_token = await _csrf_for_cookie(session_factory, cookie)
+    async with _console_client(session_factory, cookie) as client:
+        missing = await client.post(
+            f"{base}/{uuid4()}/remove",
+            data={"csrf_token": csrf_token},
+        )
+
+    assert missing.status_code == 404
+    assert "That tool is no longer published in this collection." in missing.text
+
+
+@pytest.mark.asyncio
+async def test_two_open_forms_both_submit_with_stable_csrf_token(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="owner")
+    collection_id = await _create_collection(session_factory, organization.id, "open-forms")
+
+    async with _console_client(session_factory, cookie) as client:
+        detail = await client.get(f"/console/collections/{collection_id}")
+        create_form = await client.get("/console/collections/new")
+        assert _csrf_token(detail) == _csrf_token(create_form)
+        toggled = await client.post(
+            f"/console/collections/{collection_id}/enabled",
+            data={"csrf_token": _csrf_token(detail), "enabled": "false"},
+        )
+        created = await client.post(
+            "/console/collections",
+            data={
+                "csrf_token": _csrf_token(create_form),
+                "slug": "second-open-form",
+                "display_name": "Second open form",
+                "exposure_mode": "discovery",
+            },
+        )
+
+    assert toggled.status_code == 303
+    assert created.status_code == 303
+    target = await _load_collection(session_factory, "open-forms")
+    assert target is not None
+    assert target.enabled is False
+    assert await _load_collection(session_factory, "second-open-form") is not None
+
+
+@pytest.mark.asyncio
+async def test_missing_invalid_and_cross_session_csrf_tokens_are_rejected(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="owner")
+    other_cookie, _, _ = await _browser_session(
+        session_factory, role="owner", organization=organization
+    )
+    other_session_token = await _csrf_for_cookie(session_factory, other_cookie)
+    fields = {"slug": "guarded-slug", "display_name": "Guarded", "exposure_mode": "discovery"}
+
+    async with _console_client(session_factory, cookie) as client:
+        missing = await client.post("/console/collections", data=fields)
+        invalid = await client.post("/console/collections", data={**fields, "csrf_token": "forged"})
+        cross_session = await client.post(
+            "/console/collections", data={**fields, "csrf_token": other_session_token}
+        )
+        assert await _load_collection(session_factory, "guarded-slug") is None
+
+        own_token = _csrf_token(await client.get("/console/collections/new"))
+        accepted = await client.post(
+            "/console/collections", data={**fields, "csrf_token": own_token}
+        )
+
+    assert missing.status_code == 403
+    assert invalid.status_code == 403
+    assert cross_session.status_code == 403
+    assert accepted.status_code == 303
+    assert await _load_collection(session_factory, "guarded-slug") is not None
+
+
+@pytest.mark.asyncio
+async def test_first_organization_creation_rotates_csrf_token(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, _ = await _unaffiliated_browser_session(session_factory, instance_administrator=True)
+    before = await _csrf_for_cookie(session_factory, cookie)
+
+    async with _console_client(session_factory, cookie) as client:
+        created = await client.post(
+            "/console/organizations",
+            data={
+                "csrf_token": before,
+                "slug": "rotation-first-org",
+                "display_name": "Rotation First Organization",
+            },
+        )
+        stale = await client.post(
+            "/console/organizations",
+            data={
+                "csrf_token": before,
+                "slug": "stale-first-org",
+                "display_name": "Stale First Organization",
+            },
+        )
+
+    assert created.status_code == 303
+    assert stale.status_code == 403
+    assert await _csrf_for_cookie(session_factory, cookie) != before
+
+
+@pytest.mark.asyncio
+async def test_csrf_token_is_stable_per_session_and_rotates_on_organization_switch(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cookie, first, principal = await _browser_session(session_factory)
+    async with session_factory() as session:
+        second = Organization(slug="rotate-target", display_name="Rotate Target")
+        session.add(second)
+        await session.flush()
+        session.add(OrganizationMembership(organization_id=second.id, principal_id=principal.id))
+        await session.commit()
+
+    async with _console_client(session_factory, cookie) as client:
+        first_render = _csrf_token(await client.get("/console/organizations"))
+        second_render = _csrf_token(await client.get("/console/organizations"))
+        endpoint_token = (await client.get("/auth/oidc/csrf")).json()["csrf_token"]
+        switched = await client.post(
+            "/console/organization",
+            data={"csrf_token": first_render, "organization_id": str(second.id)},
+        )
+        stale = await client.post(
+            "/console/organization",
+            data={"csrf_token": first_render, "organization_id": str(first.id)},
+        )
+        after_switch = _csrf_token(await client.get("/console/organizations"))
+
+    assert first_render == second_render == endpoint_token
+    assert switched.status_code == 303
+    assert stale.status_code == 403
+    assert after_switch != first_render

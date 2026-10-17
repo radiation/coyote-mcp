@@ -1,10 +1,11 @@
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coyote_mcp.auth import AuthenticatedPrincipal, authorize
+from coyote_mcp.discovery import get_discovery_service
 from coyote_mcp.models import (
     Collection,
     CollectionMembership,
@@ -19,7 +20,10 @@ from coyote_mcp.schemas import (
     PublicationCreate,
     PublicationUpdate,
     ServerCreate,
+    ServerUpdate,
 )
+from coyote_mcp.security import validate_endpoint
+from coyote_mcp.settings import Settings
 
 
 class DuplicateResourceError(ValueError):
@@ -34,6 +38,10 @@ class AuthorizationError(PermissionError):
     pass
 
 
+class ServerInUseError(ValueError):
+    pass
+
+
 async def create_server(
     session: AsyncSession, organization_id: UUID, request: ServerCreate
 ) -> MCPServer:
@@ -44,12 +52,12 @@ async def create_server(
         endpoint=str(request.endpoint),
         transport=request.transport,
     )
-    session.add(server)
     try:
-        await session.commit()
+        async with session.begin_nested():
+            session.add(server)
     except IntegrityError as error:
-        await session.rollback()
         raise DuplicateResourceError("A server with that name already exists.") from error
+    await session.commit()
     await session.refresh(server)
     return server
 
@@ -99,6 +107,118 @@ async def list_server_tools(
     )
 
 
+async def _authorized_server(
+    session: AsyncSession, current: AuthenticatedPrincipal, action: str, server_id: UUID
+) -> MCPServer:
+    server = await get_server(session, current.require_organization_id(), server_id)
+    if action not in current.scopes:
+        raise AuthorizationError("Insufficient permissions.")
+    decision = await authorize(
+        session,
+        current.principal,
+        action,
+        server,
+        verified_group_ids=current.verified_group_ids,
+        credential_context=current.credential_context,
+    )
+    if not decision.allowed:
+        raise AuthorizationError("Insufficient permissions.")
+    return server
+
+
+async def _authorize_organization_action(
+    session: AsyncSession, current: AuthenticatedPrincipal, action: str
+) -> None:
+    if action not in current.scopes:
+        raise AuthorizationError("Insufficient permissions.")
+    decision = await authorize(
+        session,
+        current.principal,
+        action,
+        context={"organization_id": current.require_organization_id()},
+        verified_group_ids=current.verified_group_ids,
+        credential_context=current.credential_context,
+    )
+    if not decision.allowed:
+        raise AuthorizationError("Insufficient permissions.")
+
+
+async def register_server(
+    session: AsyncSession, current: AuthenticatedPrincipal, request: ServerCreate
+) -> MCPServer:
+    await _authorize_organization_action(session, current, "server:create")
+    validate_endpoint(str(request.endpoint), Settings())
+    return await create_server(session, current.require_organization_id(), request)
+
+
+async def update_server(
+    session: AsyncSession, current: AuthenticatedPrincipal, server_id: UUID, request: ServerUpdate
+) -> MCPServer:
+    server = await _authorized_server(session, current, "server:update", server_id)
+    endpoint: str | None = None
+    if request.endpoint is not None:
+        endpoint = str(request.endpoint)
+        validate_endpoint(endpoint, Settings())
+    if request.display_name is not None:
+        server.display_name = request.display_name
+    if endpoint is not None and endpoint != server.endpoint:
+        server.endpoint = endpoint
+        server.status = "pending"
+        server.last_sync_error = None
+    await session.commit()
+    await session.refresh(server)
+    return server
+
+
+async def set_server_enabled(
+    session: AsyncSession, current: AuthenticatedPrincipal, server_id: UUID, enabled: bool
+) -> MCPServer:
+    server = await _authorized_server(session, current, "server:update", server_id)
+    server.enabled = enabled
+    await session.commit()
+    await session.refresh(server)
+    return server
+
+
+async def delete_server(
+    session: AsyncSession, current: AuthenticatedPrincipal, server_id: UUID
+) -> None:
+    server = await _authorized_server(session, current, "server:update", server_id)
+    has_memberships = (
+        await session.scalars(
+            select(CollectionMembership.server_id)
+            .where(CollectionMembership.server_id == server.id)
+            .limit(1)
+        )
+    ).first()
+    has_publications = (
+        await session.scalars(
+            select(CollectionToolPublication.id)
+            .where(CollectionToolPublication.server_id == server.id)
+            .limit(1)
+        )
+    ).first()
+    if has_memberships is not None or has_publications is not None:
+        raise ServerInUseError(
+            "Remove this server from all collections and unpublish its tools before deleting it."
+        )
+    await session.delete(server)
+    await session.commit()
+
+
+async def synchronize_server(
+    session: AsyncSession, current: AuthenticatedPrincipal, server_id: UUID
+) -> MCPServer:
+    server = await _authorized_server(session, current, "server:sync", server_id)
+    return await get_discovery_service(Settings()).sync(session, server)
+
+
+async def read_server(
+    session: AsyncSession, current: AuthenticatedPrincipal, server_id: UUID
+) -> MCPServer:
+    return await _authorized_server(session, current, "server:read", server_id)
+
+
 async def create_collection(
     session: AsyncSession, organization_id: UUID, request: CollectionCreate
 ) -> Collection:
@@ -109,14 +229,46 @@ async def create_collection(
         description=request.description,
         exposure_mode=request.exposure_mode,
     )
-    session.add(collection)
     try:
-        await session.commit()
+        async with session.begin_nested():
+            session.add(collection)
     except IntegrityError as error:
-        await session.rollback()
         raise DuplicateResourceError("A collection with that slug already exists.") from error
+    await session.commit()
     await session.refresh(collection)
     return collection
+
+
+async def register_collection(
+    session: AsyncSession, current: AuthenticatedPrincipal, request: CollectionCreate
+) -> Collection:
+    await _authorize_organization_action(session, current, "collection:create")
+    return await create_collection(session, current.require_organization_id(), request)
+
+
+async def _authorized_collection(
+    session: AsyncSession, current: AuthenticatedPrincipal, action: str, collection_id: UUID
+) -> Collection:
+    collection = await get_collection(session, current.require_organization_id(), collection_id)
+    if action not in current.scopes:
+        raise AuthorizationError("Insufficient permissions.")
+    decision = await authorize(
+        session,
+        current.principal,
+        action,
+        collection,
+        verified_group_ids=current.verified_group_ids,
+        credential_context=current.credential_context,
+    )
+    if not decision.allowed:
+        raise AuthorizationError("Insufficient permissions.")
+    return collection
+
+
+async def read_collection(
+    session: AsyncSession, current: AuthenticatedPrincipal, collection_id: UUID
+) -> Collection:
+    return await _authorized_collection(session, current, "collection:read", collection_id)
 
 
 async def update_collection(
@@ -126,8 +278,8 @@ async def update_collection(
     request: CollectionUpdate,
 ) -> Collection:
     collection = await require_collection_update(session, current, collection_id)
-
-    collection.exposure_mode = request.exposure_mode
+    for field, value in request.model_dump(exclude_unset=True).items():
+        setattr(collection, field, value)
     await session.commit()
     await session.refresh(collection)
     return collection
@@ -136,20 +288,7 @@ async def update_collection(
 async def require_collection_update(
     session: AsyncSession, current: AuthenticatedPrincipal, collection_id: UUID
 ) -> Collection:
-    collection = await get_collection(session, current.require_organization_id(), collection_id)
-    if "collection:update" not in current.scopes:
-        raise AuthorizationError("Insufficient permissions.")
-    decision = await authorize(
-        session,
-        current.principal,
-        "collection:update",
-        collection,
-        verified_group_ids=current.verified_group_ids,
-        credential_context=current.credential_context,
-    )
-    if not decision.allowed:
-        raise AuthorizationError("Insufficient permissions.")
-    return collection
+    return await _authorized_collection(session, current, "collection:update", collection_id)
 
 
 async def get_collection(
@@ -192,14 +331,94 @@ async def add_membership(
         organization_id=organization_id,
         enabled=request.enabled,
     )
-    session.add(membership)
     try:
-        await session.commit()
+        async with session.begin_nested():
+            session.add(membership)
     except IntegrityError as error:
-        await session.rollback()
         raise DuplicateResourceError("That server is already a collection member.") from error
+    await session.commit()
     await session.refresh(membership)
     return membership
+
+
+async def add_collection_member(
+    session: AsyncSession, current: AuthenticatedPrincipal, collection_id: UUID, server_id: UUID
+) -> CollectionMembership:
+    await _authorized_collection(session, current, "collection:manage_members", collection_id)
+    return await add_membership(
+        session,
+        current.require_organization_id(),
+        collection_id,
+        MembershipCreate(server_id=server_id),
+    )
+
+
+async def remove_collection_member(
+    session: AsyncSession, current: AuthenticatedPrincipal, collection_id: UUID, server_id: UUID
+) -> None:
+    await _authorized_collection(session, current, "collection:manage_members", collection_id)
+    await remove_membership(session, current.require_organization_id(), collection_id, server_id)
+
+
+async def list_collection_memberships(
+    session: AsyncSession, organization_id: UUID, collection_id: UUID, limit: int
+) -> list[tuple[CollectionMembership, MCPServer]]:
+    rows = await session.execute(
+        select(CollectionMembership, MCPServer)
+        .join(MCPServer, MCPServer.id == CollectionMembership.server_id)
+        .where(
+            CollectionMembership.collection_id == collection_id,
+            CollectionMembership.organization_id == organization_id,
+        )
+        .order_by(MCPServer.display_name, MCPServer.id)
+        .limit(limit)
+    )
+    return [(membership, server) for membership, server in rows.tuples().all()]
+
+
+async def list_addable_servers(
+    session: AsyncSession, organization_id: UUID, collection_id: UUID, limit: int
+) -> list[MCPServer]:
+    member_ids = select(CollectionMembership.server_id).where(
+        CollectionMembership.collection_id == collection_id
+    )
+    return list(
+        (
+            await session.scalars(
+                select(MCPServer)
+                .where(
+                    MCPServer.organization_id == organization_id,
+                    MCPServer.id.not_in(member_ids),
+                )
+                .order_by(MCPServer.display_name, MCPServer.id)
+                .limit(limit)
+            )
+        ).all()
+    )
+
+
+async def list_collection_tool_rows(
+    session: AsyncSession, organization_id: UUID, collection_id: UUID, limit: int, offset: int
+) -> list[tuple[Tool, MCPServer]]:
+    collection = await get_collection(session, organization_id, collection_id)
+    if not collection.enabled:
+        return []
+    rows = await session.execute(
+        select(Tool, MCPServer)
+        .join(MCPServer, MCPServer.id == Tool.server_id)
+        .join(CollectionMembership, CollectionMembership.server_id == Tool.server_id)
+        .where(
+            CollectionMembership.collection_id == collection_id,
+            CollectionMembership.organization_id == organization_id,
+            CollectionMembership.enabled.is_(True),
+            MCPServer.enabled.is_(True),
+            Tool.active.is_(True),
+        )
+        .order_by(Tool.name, Tool.server_id, Tool.id)
+        .limit(limit)
+        .offset(offset)
+    )
+    return [(tool, server) for tool, server in rows.tuples().all()]
 
 
 async def remove_membership(
@@ -262,6 +481,159 @@ async def list_publications(
     )
 
 
+async def list_publication_rows(
+    session: AsyncSession,
+    current: AuthenticatedPrincipal,
+    collection_id: UUID,
+    limit: int,
+    offset: int,
+) -> list[tuple[CollectionToolPublication, Tool, MCPServer, bool]]:
+    await require_collection_update(session, current, collection_id)
+    rows = await session.execute(
+        select(CollectionToolPublication, Tool, MCPServer, CollectionMembership.enabled)
+        .join(Tool, Tool.id == CollectionToolPublication.tool_id)
+        .join(MCPServer, MCPServer.id == CollectionToolPublication.server_id)
+        .join(
+            CollectionMembership,
+            (CollectionMembership.collection_id == CollectionToolPublication.collection_id)
+            & (CollectionMembership.server_id == CollectionToolPublication.server_id),
+        )
+        .join(Collection, Collection.id == CollectionToolPublication.collection_id)
+        .where(
+            CollectionToolPublication.collection_id == collection_id,
+            Collection.organization_id == current.require_organization_id(),
+        )
+        .order_by(CollectionToolPublication.published_name, CollectionToolPublication.id)
+        .limit(limit)
+        .offset(offset)
+    )
+    return [
+        (publication, tool, server, membership_enabled)
+        for publication, tool, server, membership_enabled in rows.tuples().all()
+    ]
+
+
+async def list_unpublished_collection_tools(
+    session: AsyncSession,
+    current: AuthenticatedPrincipal,
+    collection_id: UUID,
+    limit: int,
+    offset: int,
+) -> list[tuple[Tool, MCPServer]]:
+    await require_collection_update(session, current, collection_id)
+    rows = await session.execute(
+        select(Tool, MCPServer)
+        .join(MCPServer, MCPServer.id == Tool.server_id)
+        .join(CollectionMembership, CollectionMembership.server_id == Tool.server_id)
+        .where(
+            CollectionMembership.collection_id == collection_id,
+            CollectionMembership.organization_id == current.require_organization_id(),
+            CollectionMembership.enabled.is_(True),
+            Tool.active.is_(True),
+            ~select(CollectionToolPublication.id)
+            .where(
+                CollectionToolPublication.collection_id == collection_id,
+                CollectionToolPublication.tool_id == Tool.id,
+            )
+            .exists(),
+        )
+        .order_by(Tool.name, Tool.server_id, Tool.id)
+        .limit(limit)
+        .offset(offset)
+    )
+    return [(tool, server) for tool, server in rows.tuples().all()]
+
+
+async def list_organization_tool_rows(
+    session: AsyncSession, organization_id: UUID, limit: int, offset: int
+) -> list[tuple[Tool, MCPServer]]:
+    rows = await session.execute(
+        select(Tool, MCPServer)
+        .join(MCPServer, MCPServer.id == Tool.server_id)
+        .where(MCPServer.organization_id == organization_id)
+        .order_by(Tool.name, Tool.server_id, Tool.id)
+        .limit(limit)
+        .offset(offset)
+    )
+    return [(tool, server) for tool, server in rows.tuples().all()]
+
+
+async def count_tool_publications(
+    session: AsyncSession, organization_id: UUID, tool_ids: list[UUID]
+) -> dict[UUID, int]:
+    if not tool_ids:
+        return {}
+    rows = await session.execute(
+        select(CollectionToolPublication.tool_id, func.count(CollectionToolPublication.id))
+        .join(Collection, Collection.id == CollectionToolPublication.collection_id)
+        .where(
+            CollectionToolPublication.tool_id.in_(tool_ids),
+            Collection.organization_id == organization_id,
+        )
+        .group_by(CollectionToolPublication.tool_id)
+    )
+    return {tool_id: count for tool_id, count in rows.tuples().all()}
+
+
+def publication_exposure_issues(
+    collection: Collection,
+    membership_enabled: bool,
+    tool: Tool,
+    server: MCPServer,
+    publication: CollectionToolPublication,
+) -> tuple[str, ...]:
+    """Explain why a publication is not currently exposed through MCP.
+
+    Mirrors the gateway exposure predicate so the console reports the same
+    conditions the gateway enforces.
+    """
+    issues: list[str] = []
+    if not collection.enabled:
+        issues.append("Collection is disabled.")
+    if not publication.enabled:
+        issues.append("Publication is disabled.")
+    if not membership_enabled:
+        issues.append("Server membership is disabled.")
+    if not tool.active:
+        issues.append("Tool is inactive in the latest discovery.")
+    if not server.enabled:
+        issues.append("Server is disabled.")
+    if server.status != "ready":
+        issues.append(f"Server status is {server.status}.")
+    if server.transport != "streamable_http":
+        issues.append("Server transport is not supported by the gateway.")
+    return tuple(issues)
+
+
+async def _ensure_publication_available(
+    session: AsyncSession,
+    collection_id: UUID,
+    tool_id: UUID,
+    published_name: str,
+    *,
+    publication_id: UUID | None = None,
+) -> None:
+    name_conflict = select(CollectionToolPublication.id).where(
+        CollectionToolPublication.collection_id == collection_id,
+        CollectionToolPublication.published_name == published_name,
+    )
+    if publication_id is not None:
+        name_conflict = name_conflict.where(CollectionToolPublication.id != publication_id)
+    if await session.scalar(name_conflict.limit(1)) is not None:
+        raise DuplicateResourceError("That published name is already used in this collection.")
+    if publication_id is None:
+        tool_conflict = await session.scalar(
+            select(CollectionToolPublication.id)
+            .where(
+                CollectionToolPublication.collection_id == collection_id,
+                CollectionToolPublication.tool_id == tool_id,
+            )
+            .limit(1)
+        )
+        if tool_conflict is not None:
+            raise DuplicateResourceError("This tool is already published in this collection.")
+
+
 async def publish_tool(
     session: AsyncSession,
     current: AuthenticatedPrincipal,
@@ -286,6 +658,7 @@ async def publish_tool(
     if result is None:
         raise MissingResourceError("Catalog tool not found in this collection.")
     tool, membership = result
+    await _ensure_publication_available(session, collection_id, tool.id, request.published_name)
     publication = CollectionToolPublication(
         collection_id=collection_id,
         server_id=membership.server_id,
@@ -294,14 +667,14 @@ async def publish_tool(
         published_name=request.published_name,
         description_override=request.description_override,
     )
-    session.add(publication)
     try:
-        await session.commit()
+        async with session.begin_nested():
+            session.add(publication)
     except IntegrityError as error:
-        await session.rollback()
         raise DuplicateResourceError(
             "A publication already uses that tool or published name."
         ) from error
+    await session.commit()
     await session.refresh(publication)
     return publication
 
@@ -322,15 +695,45 @@ async def update_publication(
     )
     if publication is None:
         raise MissingResourceError("Tool publication not found.")
-    for field, value in request.model_dump(exclude_unset=True).items():
-        setattr(publication, field, value)
+    updates = request.model_dump(exclude_unset=True)
+    if updates.get("published_name") is not None:
+        await _ensure_publication_available(
+            session,
+            collection_id,
+            publication.tool_id,
+            updates["published_name"],
+            publication_id=publication.id,
+        )
     try:
-        await session.commit()
+        async with session.begin_nested():
+            for field, value in updates.items():
+                setattr(publication, field, value)
     except IntegrityError as error:
-        await session.rollback()
         raise DuplicateResourceError("A publication already uses that published name.") from error
+    await session.commit()
     await session.refresh(publication)
     return publication
+
+
+async def read_publication(
+    session: AsyncSession,
+    current: AuthenticatedPrincipal,
+    collection_id: UUID,
+    publication_id: UUID,
+) -> tuple[CollectionToolPublication, Tool]:
+    await require_collection_update(session, current, collection_id)
+    row = await session.execute(
+        select(CollectionToolPublication, Tool)
+        .join(Tool, Tool.id == CollectionToolPublication.tool_id)
+        .where(
+            CollectionToolPublication.id == publication_id,
+            CollectionToolPublication.collection_id == collection_id,
+        )
+    )
+    result = row.tuples().one_or_none()
+    if result is None:
+        raise MissingResourceError("Tool publication not found.")
+    return result
 
 
 async def remove_publication(

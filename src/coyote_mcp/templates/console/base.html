@@ -15,10 +15,9 @@
         <a class="brand" href="{{ url_for('overview') }}">coyote-mcp</a>
         <nav>
           {{ components.navigation_item('Overview', 'overview', url_for('overview'), active_navigation|default('')) }}
-          {{ components.navigation_item('MCP Servers', 'servers', url_for('placeholder', page_name='servers'), active_navigation|default('')) }}
-          {{ components.navigation_item('Collections', 'collections', url_for('placeholder', page_name='collections'), active_navigation|default('')) }}
-          {{ components.navigation_item('Tool Catalog', 'tools', url_for('placeholder', page_name='tools'), active_navigation|default('')) }}
-          {{ components.navigation_item('Publications', 'publications', url_for('placeholder', page_name='publications'), active_navigation|default('')) }}
+          {{ components.navigation_item('MCP Servers', 'servers', url_for('server_list'), active_navigation|default('')) }}
+          {{ components.navigation_item('Collections', 'collections', url_for('collection_list'), active_navigation|default('')) }}
+          {{ components.navigation_item('Tool Catalog', 'tools', url_for('tool_catalog'), active_navigation|default('')) }}
           {{ components.navigation_item('Principals & Roles', 'principals', url_for('placeholder', page_name='principals'), active_navigation|default('')) }}
           {{ components.navigation_item('API Tokens', 'tokens', url_for('placeholder', page_name='tokens'), active_navigation|default('')) }}
           <a class="navigation-item" href="{{ url_for('organization_selection') }}" hx-boost="false">Switch organization</a>

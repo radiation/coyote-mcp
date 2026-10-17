@@ -10,6 +10,16 @@
 <section class="empty-state" aria-label="{{ title }}"><h2>{{ title }}</h2><p>{{ message }}</p></section>
 {%- endmacro %}
 
+{% macro pagination(request, page, has_next, param='page') -%}
+{% if page > 1 or has_next %}
+<nav class="pagination" aria-label="Pagination">
+  {% if page > 1 %}<a href="{{ request.url.include_query_params(**{param: page - 1}) }}">Previous</a>{% endif %}
+  <span>Page {{ page }}</span>
+  {% if has_next %}<a href="{{ request.url.include_query_params(**{param: page + 1}) }}">Next</a>{% endif %}
+</nav>
+{% endif %}
+{%- endmacro %}
+
 {% macro page_header(title, description='') -%}
 <header class="page-header"><div><h1>{{ title }}</h1>{% if description %}<p>{{ description }}</p>{% endif %}</div><div class="page-actions"></div></header>
 {%- endmacro %}

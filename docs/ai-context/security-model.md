@@ -39,6 +39,22 @@ and retains explicit PAT scopes plus organization-role evaluation; instance-admi
 status does not elevate a PAT or create a cross-organization PAT.
 MCP collection authorization remains membership- and publication-gated, so an
 instance-administrator PAT cannot discover or execute unpublished tools.
+Phase 4B console writes (server registration, edit, enable/disable, refresh,
+removal, collection management, membership, and tool publication) require a
+valid CSRF token before authorization, resolve the active organization from the
+server-side session, and check the matching action through `auth.authorize`.
+Instance-admin override applies only to browser sessions. Publication state
+and publish, edit, and unpublish actions require `collection:update`, and
+published-tool visibility in the console requires the same action. Console
+pages render untrusted tool descriptions and downstream text through Jinja2
+autoescaping. CSRF tokens are HMAC-SHA256 values derived from the browser
+session's stored secret hash, a non-secret `csrf_epoch` counter, and the
+configured session secret key. Nothing secret is stored, rendering does not
+write to the database, and every form rendered in one session shares a valid
+token, so several open forms can be submitted. The epoch is incremented only at
+lifecycle boundaries (organization switch), which invalidates forms opened
+before the switch. A new login creates a new session with a new token, and
+tokens never validate across sessions.
 PAT scopes further attenuate permissions. External identities use issuer plus
 subject, not email. Groups are taken from validated ID-token claims and evaluated
 against organization-scoped mappings.
