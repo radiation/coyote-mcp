@@ -56,6 +56,11 @@ td small { display: block; margin-top: .15rem; }
 .badge-error { border-color: #9b514e; color: var(--danger); }
 .badge-syncing { border-color: #806932; color: var(--warning); }
 .badge-unpublished { border-color: var(--border); color: var(--muted); }
+.badge-connected { border-color: #3b916a; color: var(--accent); }
+.badge-expired, .badge-authorization-required, .badge-reauthorization-required { border-color: #806932; color: var(--warning); }
+.badge-available, .badge-disabled, .badge-none { border-color: var(--border); color: var(--muted); }
+.form-notice { border: 1px solid #3b916a; color: var(--accent); margin-top: 1rem; padding: .75rem 1rem; }
+.app-icon { border: 1px solid var(--border); display: inline-grid; font-size: .7rem; font-weight: 700; height: 2rem; margin-right: .5rem; place-items: center; vertical-align: middle; width: 2rem; }
 .issue-list { margin: 0; padding-left: 1.1rem; }
 .row-actions { white-space: nowrap; }
 .form-warning { border: 1px solid #806932; color: var(--warning); padding: .6rem .8rem; }

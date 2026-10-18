@@ -14,7 +14,11 @@ Catalog entities are organization-scoped. Identities are instance-wide and gain 
 | ExternalGroup and GroupRoleMapping | A group maps a validated claim value to organization or collection-scoped built-in roles. |
 | BrowserSession | Server-side session for a principal with hashed opaque verifier, CSRF rotation epoch, verified group IDs, expiry, activity, revocation, and optional active organization ID. |
 | OIDCLoginTransaction | Short-lived, single-use server-side state/nonce/PKCE record bound to a browser. |
-| MCPServer | Registered downstream server with one organization, endpoint, transport, enabled state, sync state, and tool generation. Disabled servers are excluded from gateway discovery and execution. |
+| MCPServer | Registered downstream server with one organization, endpoint, transport, enabled state, sync state, tool generation, and `auth_policy` (`none`, `shared_bearer`, or `per_user_oauth`; default `none`). Disabled servers are excluded from gateway discovery and execution. |
+| DownstreamSharedCredential | One sealed `shared_bearer` service credential per organization and server. Stores only the AES-GCM ciphertext and key version; values are never returned by any API, template, or log. |
+| DownstreamOAuthIntegration | One per organization and server: provider (`github` or `generic`), authorization, token, revocation, and account endpoints, client ID, sealed client secret, requested scopes, and an enabled flag. Client secrets are never returned. |
+| DownstreamConnection | One per organization, server, and principal. Holds sealed access and refresh tokens, status (`connected` or `reauthorization_required`), granted scopes, account identifier, token expiry, and refresh time. Bound to the global principal, not the browser session. |
+| DownstreamOAuthTransaction | Single-use, short-lived OAuth record keyed by a hashed state. Bound to browser session, principal, organization, and server; holds a sealed PKCE verifier and a `consumed_at` marker claimed atomically on callback. |
 | Tool | Persisted advertised tool for one server; schema/annotations are untrusted metadata and active state is reconciliation-managed. |
 | Collection | Organization-scoped capability/discovery grouping with an enabled state and an exposure mode: `discovery` for bound universal tools or `native` for direct persisted-tool publication. |
 | CollectionMembership | Many-to-many server/collection link constrained so both resources belong to the same organization. |

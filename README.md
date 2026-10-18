@@ -323,6 +323,45 @@ shell. HTMX is loaded from the version-pinned
 `https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js` URL; update the explicit
 version deliberately when upgrading it. There is no Node build pipeline.
 
+## Phase 4C downstream authentication and Connected Apps
+
+Each registered server has an authentication policy: `none` (the default, used
+by DeepWiki), `shared_bearer` (an administrator-stored service credential), or
+`per_user_oauth` (each user connects their own account). Administrators set the
+policy and manage integrations and shared credentials from the server's
+Authentication page in the console.
+
+Users manage connections from **My Profile → Connected Apps**. Connect starts an
+OAuth authorization-code flow with PKCE, and Reconnect and Disconnect are
+available from the same page. Ordinary enabled members can use these pages.
+Coyote never shows tokens or client secrets.
+
+Credentials are sealed with AES-256-GCM. Configure these settings before
+connecting an OAuth app or storing a shared credential:
+
+- `CREDENTIAL_ENCRYPTION_KEYS`: a JSON object mapping a version name to a
+  base64url-encoded 32-byte key. Generate a key with
+  `python -c "import secrets,base64;print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"`.
+- `CREDENTIAL_ACTIVE_KEY_VERSION`: the version used for new writes.
+- `DOWNSTREAM_OAUTH_REDIRECT_BASE_URL`: the public origin used to build the exact
+  callback URI `<origin>/console/connected-apps/callback`. Register that URI with
+  the OAuth app.
+
+To rotate, add a new version to the key map, set it as active, and restart.
+Keep old versions until no row needs them. Rows are re-sealed when they are next
+written; no automated re-seal command is provided yet.
+
+GitHub is the first provider. Create a GitHub **OAuth App** (not a GitHub App,
+which is not supported yet) with the callback URI above, and enter its client ID
+and client secret in the server's Authentication page. Requested scopes are
+configured by the administrator. Disconnect removes Coyote's stored credentials,
+but it cannot revoke the grant at GitHub because no revocation endpoint is used.
+Revoke the grant in GitHub settings when needed.
+
+Service principals cannot use personal connections, and browser instance-admin
+status does not grant downstream access. A missing or expired connection returns
+a structured `connection_required` error to MCP callers.
+
 ## Local end-to-end smoke test
 
 The optional `smoke` Compose profile starts an internal FastMCP server with

@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     )
     max_execution_result_bytes: int = 1_048_576
     pat_max_lifetime_seconds: int = 60 * 60 * 24 * 90
+    credential_encryption_keys: dict[str, SecretStr] = Field(default_factory=dict)
+    credential_active_key_version: str | None = None
+    downstream_oauth_redirect_base_url: str | None = None
+    downstream_oauth_timeout_seconds: float = 10.0
     environment: str = "development"
     session_secret_key: str = "development-only-change-me"
     session_max_age_seconds: int = 60 * 60 * 8

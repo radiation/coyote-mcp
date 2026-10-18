@@ -9,7 +9,12 @@
 | `api.py` | Authenticated control-plane endpoints for catalog, PATs, service principals, groups, and mappings. |
 | `catalog.py` | Organization-scoped server, collection, membership, catalog, and collection tool-publication queries and mutations. Publication services check for alias and tool conflicts, use savepoints for constraint violations, and bound list queries. |
 | `discovery.py` | Streamable HTTP tool discovery, pinned HTTP transport, reconciliation, and generation-safe sync. |
-| `gateway.py` | Publication-gated persisted-catalog MCP search, description, collection endpoint publication, execution-time authorization snapshots, spawned and resource-bounded schema validation, escaped lexical search, bounded downstream invocation, and result sanitization. Global and native endpoints resolve enabled collection publication records for discovery and invocation. |
+| `credential_vault.py` | AES-256-GCM sealing with key versions and domain-prefixed AAD. Used only for downstream secrets, tokens, and PKCE verifiers. |
+| `credentials.py` | Credential broker for `none`, `shared_bearer`, and `per_user_oauth`. Returns per-call authorization headers, rejects service-principal personal credentials, and marks rejected connections for reauthorization. |
+| `downstream_oauth.py` | Reusable OAuth authorization-code protocol pieces: PKCE, state, the GitHub preset, validated token exchange, and token-set redaction. |
+| `downstream_errors.py` | Leaf module with the sanitized downstream authorization error type, shared without an import cycle. |
+| `connected_apps.py` | Self-service Connected Apps and administrator integration services: start, complete, and disconnect connections, plus policy and shared-credential writes. |
+| `gateway.py` | Publication-gated persisted-catalog MCP search, description, collection endpoint publication, execution-time authorization snapshots, spawned and resource-bounded schema validation, escaped lexical search, bounded downstream invocation, and result sanitization. Global and native endpoints resolve enabled collection publication records for discovery and invocation. Execution attaches only the broker-selected downstream credential for the caller. |
 | `auth.py` | PAT/browser authentication, immutable authenticated organization context, session lifecycle, memberships, roles, group mappings, browser-session-only instance-admin authorization, organization creation, and batched collection-grant evaluation. |
 | `oidc.py` | Settings-configured single-provider OIDC discovery, PKCE login, browser binding, code exchange, ID-token validation, and logout/CSRF flows. |
 | `security.py` | Destination, public-address, scheme, and OIDC trust-boundary validation. |
@@ -19,7 +24,7 @@
 | `cli.py` | Operator-only trusted issuer/subject binding for instance-administrator bootstrap and recovery; it never issues a PAT or browser session. |
 | `scripts/mock_mcp_server.py` | Compose-profile-only FastMCP mock exposing deterministic echo, addition, and failure tools. |
 | `scripts/smoke_mcp.py` | Live local smoke runner: temporary tenant bootstrap/cleanup plus REST and authenticated MCP workflow validation. |
-| `alembic/` | Additive schema history through the current identity, session, and provider-secret revisions. |
+| `alembic/` | Additive schema history through the downstream credential revision (`0019`: policy column, shared credentials, OAuth integrations, connections, and transactions). |
 
 ## Key execution paths
 
@@ -59,8 +64,9 @@
 - Add persistence through a new Alembic revision and matching SQLAlchemy model,
   constraints, Pydantic contracts, and tests.
 - Add downstream transport/auth support only through the validated discovery
-   boundary. Execution currently supports registered unauthenticated Streamable
-   HTTP servers only.
+   boundary and the credential broker. Authentication policies are `none`,
+   `shared_bearer`, and `per_user_oauth`; new policies must be added to the
+   broker, the policy check constraint, and the authorization tests together.
 - `tests/test_gateway.py` hosts a deterministic local FastMCP Streamable HTTP
    server with Uvicorn for execution integration tests. It verifies discovery,
    description, execution, structured tool errors, timeout/connection failures,

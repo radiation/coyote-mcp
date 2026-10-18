@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -217,7 +218,9 @@ async def test_tools_with_same_name_are_isolated_by_server(
 
 
 class FailingDiscoveryClient:
-    async def list_tools(self, endpoint: str) -> list[DiscoveredTool]:
+    async def list_tools(
+        self, endpoint: str, headers: Mapping[str, str] | None = None
+    ) -> list[DiscoveredTool]:
         raise TimeoutError(endpoint)
 
 
@@ -237,7 +240,9 @@ class FixedDiscoveryClient:
         self._tools = tools
         self.endpoints: list[str] = []
 
-    async def list_tools(self, endpoint: str) -> list[DiscoveredTool]:
+    async def list_tools(
+        self, endpoint: str, headers: Mapping[str, str] | None = None
+    ) -> list[DiscoveredTool]:
         self.endpoints.append(endpoint)
         return self._tools
 
@@ -250,7 +255,9 @@ class EndpointChangingDiscoveryClient:
         self._current = current
         self._server_id = server_id
 
-    async def list_tools(self, endpoint: str) -> list[DiscoveredTool]:
+    async def list_tools(
+        self, endpoint: str, headers: Mapping[str, str] | None = None
+    ) -> list[DiscoveredTool]:
         await catalog.update_server(
             self._session,
             self._current,

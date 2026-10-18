@@ -21,6 +21,7 @@
     {% endif %}
     {% if can_update %}
     <a class="button button-secondary" href="{{ url_for('server_edit_form', server_id=server.id) }}">Edit server</a>
+    <a class="button button-secondary" href="{{ url_for('server_authentication_page', server_id=server.id) }}">Authentication</a>
     <form method="post" action="{{ url_for('server_set_enabled', server_id=server.id) }}" hx-boost="false" class="inline-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="enabled" value="{{ 'false' if server.enabled else 'true' }}">

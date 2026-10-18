@@ -1,6 +1,6 @@
 import hashlib
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -12,6 +12,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coyote_mcp.downstream_errors import DownstreamAuthorizationError
 from coyote_mcp.models import MCPServer, Tool
 from coyote_mcp.security import ResolvedEndpoint, UnsafeEndpointError, resolve_endpoint
 from coyote_mcp.settings import Settings
@@ -39,7 +40,12 @@ class DiscoveredTool:
 
 
 class ToolDiscoveryClient(Protocol):
-    async def list_tools(self, endpoint: str) -> Sequence[DiscoveredTool]: ...
+    async def list_tools(
+        self, endpoint: str, headers: Mapping[str, str] | None = None
+    ) -> Sequence[DiscoveredTool]: ...
+
+
+DiscoveryHeadersProvider = Callable[[], Awaitable[Mapping[str, str]]]
 
 
 class SyncFailedError(RuntimeError):
@@ -142,11 +148,14 @@ class FastMCPDiscoveryClient:
 
         return factory
 
-    async def list_tools(self, endpoint: str) -> Sequence[DiscoveredTool]:
+    async def list_tools(
+        self, endpoint: str, headers: Mapping[str, str] | None = None
+    ) -> Sequence[DiscoveredTool]:
         resolved_endpoint = self._resolve_endpoint(endpoint)
 
         transport = StreamableHttpTransport(
             endpoint,
+            headers=dict(headers) if headers else None,
             httpx_client_factory=self._http_client_factory(
                 resolved_endpoint, self._timeout_seconds
             ),
@@ -220,7 +229,17 @@ class DiscoveryService:
         self._client = client
         self._settings = settings
 
-    async def sync(self, session: AsyncSession, server: MCPServer) -> MCPServer:
+    async def sync(
+        self,
+        session: AsyncSession,
+        server: MCPServer,
+        headers_provider: DiscoveryHeadersProvider | None = None,
+    ) -> MCPServer:
+        """Refresh the catalog for ``server``.
+
+        ``headers_provider`` supplies the downstream credential for the discovery request.
+        If it fails, the sync is marked as an error and the last-known catalog is kept.
+        """
         locked_server = await session.scalar(
             select(MCPServer)
             .where(MCPServer.id == server.id)
@@ -236,8 +255,12 @@ class DiscoveryService:
         await session.commit()
 
         try:
-            discovered_tools = await self._client.list_tools(endpoint)
+            headers = await headers_provider() if headers_provider is not None else None
+            discovered_tools = await self._client.list_tools(endpoint, headers=headers)
         except Exception as error:
+            failure_message = (
+                error.message if isinstance(error, DownstreamAuthorizationError) else None
+            ) or "Discovery failed."
             locked_server = await session.scalar(
                 select(MCPServer)
                 .where(MCPServer.id == server.id)
@@ -250,9 +273,9 @@ class DiscoveryService:
                 await session.rollback()
                 raise SyncSupersededError("A newer synchronization is in progress.") from error
             locked_server.status = "error"
-            locked_server.last_sync_error = "Discovery failed."
+            locked_server.last_sync_error = failure_message
             await session.commit()
-            raise SyncFailedError("Discovery failed.") from error
+            raise SyncFailedError(failure_message) from error
 
         locked_server = await session.scalar(
             select(MCPServer)

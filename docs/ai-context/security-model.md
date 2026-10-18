@@ -76,7 +76,84 @@ PAT scopes further attenuate permissions. External identities use issuer plus
 subject, not email. Groups are taken from validated ID-token claims and evaluated
 against organization-scoped mappings.
 
-## Network safety and limitations
+## Downstream credentials and Connected Apps
+
+Each registered server has one of three authentication policies. `none` sends no
+downstream credential, which preserves unauthenticated servers such as DeepWiki.
+`shared_bearer` uses an administrator-stored service credential for the whole
+organization. `per_user_oauth` requires each human principal to connect their own
+account; a shared credential is never substituted when a user's connection is
+missing, expired, or revoked.
+
+- **Encryption:** Credentials are sealed with AES-256-GCM. Keys come from
+  `CREDENTIAL_ENCRYPTION_KEYS` (a JSON object mapping version to a base64url
+  32-byte key) and `CREDENTIAL_ACTIVE_KEY_VERSION`. Keys are required before any
+  secret or connection can be written; without them those operations fail closed. Each value's additional
+  authenticated data binds the domain and its owner: `(organization, server)` for
+  shared credentials and client secrets, `(organization, server, principal)` for
+  connections, and `(organization, server, state hash)` for PKCE verifiers.
+  Ciphertext moved between rows fails authentication.
+- **Rotation:** Add a new key version to the map, make it active, and restart.
+  Reads accept every configured version. Writes re-seal with the active version.
+  Keep old versions until no row references them; a dedicated re-seal command is
+  not implemented.
+- **Redaction:** Stored values never appear in API responses, templates, logs,
+  exception text, or tool results. Downstream 401 and 403 responses are mapped to
+  sanitized errors, and the caller sees only a stable code.
+- **Broker:** The credential broker resolves the policy, checks the server's
+  organization, and selects the credential for the server and authenticated
+  principal. It returns headers only for the single downstream call. Caller PATs and
+  browser-session secrets are never forwarded, and clients do not receive the
+  headers. Fail-closed codes include `connection_required`, `connection_expired`,
+  `service_principal_not_permitted`, `credential_not_configured`, and
+  `authorization_not_configured`.
+- **Service principals** cannot start, complete, or use a personal connection, so
+  `per_user_oauth` servers fail closed for them.
+- **Instance administrators** gain no downstream access through browser
+  administration. Authorization for a tool still requires the caller's own
+  connection.
+- **Refresh:** Refresh runs under a row lock (`SELECT ... FOR UPDATE` on
+  PostgreSQL) and is held across the token request. Rejected grants
+  (`invalid_grant`, `invalid_client`, `unauthorized_client`) mark the connection
+  `reauthorization_required`. Refresh tokens are never returned or logged.
+- **Retry safety:** The gateway never retries a tool execution after a token
+  refresh or upstream rejection.
+- **OAuth:** The authorization-code flow uses PKCE S256 and a 256-bit random state.
+  Only the state hash is stored. Each transaction is bound to the browser session,
+  principal, organization, and server, and expires after 10 minutes. The callback
+  claims the transaction with one `UPDATE ... RETURNING`, so a replayed, unknown,
+  expired, or mismatched callback fails. A provider error also consumes the
+  transaction. Endpoints must be HTTPS public destinations, redirects are disabled,
+  DNS is pinned, and the redirect URI is fixed to
+  `DOWNSTREAM_OAUTH_REDIRECT_BASE_URL` plus `/console/connected-apps/callback`.
+- **Providers:** The GitHub preset overrides submitted endpoints with the
+  documented `github.com` OAuth endpoints. Generic providers must supply every
+  endpoint explicitly. Authorization-server metadata discovery (RFC 8414) and
+  resource indicators (RFC 8707) are not implemented.
+- **Revocation and disconnect:** Disconnect deletes the local connection first and
+  then attempts revocation when a revocation endpoint is configured. GitHub
+  OAuth Apps have no revocation endpoint here, so disconnect removes local
+  credentials only and reports that the grant remains active at the provider.
+  Replacing a connection does not revoke the previous grant.
+- **Self-service:** `connection:manage_own` lets any enabled member who holds an
+  organization-wide or collection-scoped role manage their own connections. Every
+  query is keyed by the caller's principal, so one user cannot read or change
+  another user's connection.
+- **Administration:** Configuring policy, integrations, and shared credentials
+  requires `server:update` and `credential:*`. Secret fields are write-only: the
+  console shows only whether a value is stored. These writes do not yet produce
+  audit events.
+- **Discovery for authenticated servers:** Synchronization uses the credential for
+  the caller who starts it. For `shared_bearer`, that is the registered shared
+  credential. For `per_user_oauth`, it is the caller's own connection. If that
+  credential is missing or invalid, synchronization fails closed and the last-known
+  catalog is kept. The service never uses an administrator's personal connection
+  or a shared identity to decide what an individual user may call. Discovered tools
+  remain catalog metadata; execution still checks the caller's publication,
+  collection membership, and connection.
+- **Icons:** Only a locally bundled allowlisted monogram is shown. Remote icons
+  are never fetched, and administrator uploads are not supported.
+
 
 Downstream discovery and OIDC calls validate destinations, reject embedded URL
 credentials, require HTTPS/public routing by default, disable redirects, and
@@ -134,5 +211,5 @@ request headers. The configured response-size limit is applied immediately
 after FastMCP materializes a result. Its current public client transport does
 not provide a compatible streaming response-limit hook.
 
-There are no downstream credential delegation, audit events, cancellation, or
-fine-grained per-tool deny policies yet. Tool annotations never establish safety.
+There are no audit events, execution cancellation, or fine-grained per-tool deny
+policies yet. Tool annotations never establish safety.

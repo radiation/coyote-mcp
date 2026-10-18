@@ -18,10 +18,8 @@ from coyote_mcp.auth import (
 from coyote_mcp.db import get_session
 from coyote_mcp.dependencies import current_principal
 from coyote_mcp.discovery import (
-    DiscoveryService,
     SyncFailedError,
     SyncSupersededError,
-    get_discovery_service,
 )
 from coyote_mcp.models import (
     Collection,
@@ -153,9 +151,9 @@ async def sync_server(server_id: UUID, session: Session, current: Current) -> Se
     except catalog.MissingResourceError as error:
         raise resource_not_found(error) from error
     await require(session, current, "server:sync", server)
-    service: DiscoveryService = get_discovery_service(Settings())
     try:
-        return ServerResponse.model_validate(await service.sync(session, server))
+        discovered = await catalog.discover_server(session, current, server)
+        return ServerResponse.model_validate(discovered)
     except SyncFailedError as error:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,

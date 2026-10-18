@@ -1,0 +1,110 @@
+{% import "console/components.html" as components %}
+{% set integration = view.integration %}
+{{ components.page_header('Authentication: ' ~ view.server_name, 'Downstream authentication policy and integration settings for this server.') }}
+{% if action_error %}<div class="form-error" role="alert">{{ action_error }}</div>{% endif %}
+<p><a href="{{ url_for('server_detail', server_id=view.server_id) }}">Back to server</a></p>
+
+<section class="section-block" aria-labelledby="auth-policy-title">
+  <div class="section-heading"><h2 id="auth-policy-title">Authentication policy</h2></div>
+  <p class="muted">
+    <strong>none</strong>: no downstream credentials. <strong>shared_bearer</strong>: one administrator-configured service credential.
+    <strong>per_user_oauth</strong>: each user connects their own account. Tools on per-user servers never fall back to a shared credential.
+  </p>
+  <form method="post" action="{{ url_for('server_authentication_policy', server_id=view.server_id) }}" hx-boost="false" class="form-stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field">
+      <span class="field-label">Policy</span>
+      <select name="auth_policy">
+        {% for policy in auth_policies %}
+        <option value="{{ policy }}" {% if policy == view.auth_policy %}selected{% endif %}>{{ policy }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div><button type="submit">Save policy</button></div>
+  </form>
+</section>
+
+<section class="section-block" aria-labelledby="shared-credential-title">
+  <div class="section-heading"><h2 id="shared-credential-title">Shared service credential</h2></div>
+  <p>Status: {% if view.shared_credential_configured %}<span class="badge badge-connected">Configured</span>{% if view.shared_credential_updated_at %} <span class="muted">Updated {{ view.shared_credential_updated_at.strftime('%Y-%m-%d %H:%M UTC') }}</span>{% endif %}{% else %}<span class="badge badge-none">Not configured</span>{% endif %}</p>
+  <p class="muted">Stored values are write-only and are never displayed again. Used only by <code>shared_bearer</code> servers.</p>
+  <form method="post" action="{{ url_for('server_authentication_shared_credential', server_id=view.server_id) }}" hx-boost="false" class="form-stack" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field">
+      <span class="field-label">New credential value</span>
+      <input type="password" name="credential_value" autocomplete="new-password" required>
+      <small>Saving replaces any existing value.</small>
+    </label>
+    <div><button type="submit">Save credential</button></div>
+  </form>
+  {% if view.shared_credential_configured %}
+  <form method="post" action="{{ url_for('server_authentication_shared_credential_clear', server_id=view.server_id) }}" hx-boost="false" class="inline-form" onsubmit="return confirm('Remove the shared credential?');">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="button-danger">Remove shared credential</button>
+  </form>
+  {% endif %}
+</section>
+
+<section class="section-block" aria-labelledby="integration-title">
+  <div class="section-heading"><h2 id="integration-title">Per-user OAuth integration</h2></div>
+  {% if integration and integration.configuration_error %}<div class="form-error" role="alert"><strong>Configuration error</strong><p>{{ integration.configuration_error }}</p></div>{% endif %}
+  <dl class="detail-list">
+    <dt>Connected users</dt><dd>{{ view.connected_count }}</dd>
+    <dt>Reauthorization required</dt><dd>{{ view.reauthorization_required_count }}</dd>
+    <dt>Integration</dt><dd>{% if integration %}{% if integration.enabled %}Enabled — visible to members in Connected Apps{% else %}Disabled — members cannot connect{% endif %}{% else %}Not configured{% endif %}</dd>
+  </dl>
+  {% if integration %}
+  <form method="post" action="{{ url_for('server_authentication_integration_enabled', server_id=view.server_id) }}" hx-boost="false" class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="enabled" value="{{ 'false' if integration.enabled else 'true' }}">
+    <button type="submit" class="button-secondary">{{ 'Disable integration' if integration.enabled else 'Enable integration' }}</button>
+  </form>
+  {% endif %}
+
+  <form method="post" action="{{ url_for('server_authentication_integration', server_id=view.server_id) }}" hx-boost="false" class="form-stack" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field">
+      <span class="field-label">Provider</span>
+      <select name="provider">
+        {% for provider in providers %}
+        <option value="{{ provider }}" {% if integration and integration.provider == provider %}selected{% endif %}>{{ provider }}</option>
+        {% endfor %}
+      </select>
+      <small>The GitHub preset uses fixed GitHub OAuth endpoints. Endpoint fields below apply only to the generic provider.</small>
+    </label>
+    <label class="field">
+      <span class="field-label">Client ID</span>
+      <input type="text" name="client_id" value="{{ integration.client_id if integration else '' }}" required>
+    </label>
+    <label class="field">
+      <span class="field-label">Client secret</span>
+      <input type="password" name="client_secret" autocomplete="new-password" placeholder="{{ 'Leave blank to keep the stored secret' if integration and integration.has_client_secret else '' }}">
+      <small>Write-only. Blank keeps the stored secret.</small>
+    </label>
+    <label class="field">
+      <span class="field-label">Scopes</span>
+      <input type="text" name="scopes" value="{{ integration.scopes|join(' ') if integration else '' }}">
+      <small>Space- or comma-separated.</small>
+    </label>
+    <label class="field">
+      <span class="field-label">Authorization endpoint (generic provider)</span>
+      <input type="url" name="authorization_endpoint" value="{{ integration.authorization_endpoint if integration else '' }}">
+    </label>
+    <label class="field">
+      <span class="field-label">Token endpoint (generic provider)</span>
+      <input type="url" name="token_endpoint" value="{{ integration.token_endpoint if integration else '' }}">
+    </label>
+    <label class="field">
+      <span class="field-label">Revocation endpoint (optional)</span>
+      <input type="url" name="revocation_endpoint" value="{{ integration.revocation_endpoint or '' if integration else '' }}">
+    </label>
+    <label class="field">
+      <span class="field-label">Account endpoint (optional)</span>
+      <input type="url" name="account_endpoint" value="{{ integration.account_endpoint or '' if integration else '' }}">
+    </label>
+    <label class="field">
+      <span class="field-label"><input type="checkbox" name="enabled" value="on" {% if integration and integration.enabled %}checked{% endif %}> Enabled</span>
+    </label>
+    <div><button type="submit">Save integration</button></div>
+  </form>
+</section>
