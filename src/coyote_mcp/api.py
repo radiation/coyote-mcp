@@ -8,7 +8,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coyote_mcp import catalog
-from coyote_mcp.audit import AuditAction, AuditTargetType, record_principal_audit_event
+from coyote_mcp.audit import (
+    AuditAction,
+    AuditActorType,
+    AuditTargetType,
+    record_independent_denial_event,
+    record_principal_audit_event,
+)
 from coyote_mcp.auth import (
     ROLE_PERMISSIONS,
     AuthenticatedPrincipal,
@@ -81,6 +87,7 @@ async def require(
     resource: object | None = None,
 ) -> None:
     if action not in current.scopes:
+        await _record_authorization_denial(session, current, action, "scope_not_granted")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions."
         )
@@ -101,9 +108,30 @@ async def require(
         current.credential_context,
     )
     if not decision.allowed:
+        await _record_authorization_denial(session, current, action, decision.reason)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions."
         )
+
+
+async def _record_authorization_denial(
+    session: AsyncSession, current: AuthenticatedPrincipal, action: str, reason_code: str
+) -> None:
+    if current.organization_id is None:
+        return
+    await record_independent_denial_event(
+        session,
+        organization_id=current.organization_id,
+        action=AuditAction.AUTHORIZATION_DENIED,
+        target_type=AuditTargetType.AUTHORIZATION,
+        metadata={"action": action, "reason_code": reason_code},
+        actor_type=(
+            AuditActorType.SERVICE
+            if current.principal.identity_type == "service"
+            else AuditActorType.HUMAN
+        ),
+        actor_id=current.principal.id,
+    )
 
 
 @router.post("/servers", response_model=ServerResponse, status_code=status.HTTP_201_CREATED)

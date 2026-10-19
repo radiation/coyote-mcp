@@ -267,3 +267,33 @@ authentication failures, MCP outcomes, and read-only security events that occur
 outside a mutation transaction. Execution cancellation and fine-grained
 per-tool deny policies remain unimplemented. Tool annotations never establish
 safety.
+
+### Authentication and authorization denial auditing
+
+P5-02C1 independently persists classified PAT and browser-session failures
+only when a server-side credential/session record supplies a trustworthy
+organization. It records a system actor, `authentication.failed`, the
+authentication mechanism, and a bounded reason category; it never associates
+an unauthenticated attempt with a principal. Completely unrecognized or
+malformed credentials, unaffiliated browser sessions, and OIDC failures before
+an organization can be safely established remain sanitized operational logs,
+not tenant audit events. The tenant-scoped audit schema deliberately cannot
+represent them without inventing an organization.
+
+Central API and console authorization checks, plus denied MCP collection
+endpoint access, independently write `authorization.denied` when they have an
+authenticated principal and active organization. The audit row records that
+principal's trustworthy actor snapshot, a requested action, a bounded policy
+reason, and the request correlation ID. Cross-organization
+lookups that intentionally return not-found to prevent resource enumeration
+remain unaudited because no authorization decision is exposed.
+
+Denial-event writes use a short-lived database session and transaction separate
+from the request transaction. `COYOTE_INDEPENDENT_AUDIT_TIMEOUT_SECONDS`
+defaults to a conservative two-second deadline covering session acquisition,
+insert/flush, and commit. Timeout or persistence failure is sanitized to
+operational logging and never changes an authentication failure or
+authorization denial into success; parent-request cancellation still
+propagates normally. Successful privileged mutations retain the
+P5-02B caller-transaction, fail-closed guarantee; they do not use this path.
+MCP execution-outcome auditing remains deferred.

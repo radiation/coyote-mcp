@@ -348,9 +348,19 @@ that credential state. Auditing the earlier consumption atomically would require
 holding a database transaction across untrusted provider I/O, so it is not
 given a non-atomic success event in P5-02B.
 
-P5-02C remains deliberately deferred: authentication failures, authorization
-denials, MCP execution outcomes, read-only security activity, audit query/UI,
-export/retention, and asynchronous delivery are not implemented here.
+P5-02C1 independently persists attributable PAT/browser authentication
+failures and centralized API, console, and MCP collection authorization denials.
+Each uses a short-lived transaction distinct from the denied request, bounded
+by the configurable two-second `COYOTE_INDEPENDENT_AUDIT_TIMEOUT_SECONDS`
+deadline across acquisition, flush, and commit, and preserves the original
+denied response if audit persistence fails or times out, while
+sanitized operational logging makes evidence loss visible. The tenant-required
+schema intentionally leaves malformed or unrecognized credentials,
+unaffiliated sessions, pre-tenant OIDC failures, and non-disclosing
+cross-organization not-found responses out of the ledger rather than assigning
+an arbitrary organization. MCP execution outcomes, broader read-only security
+activity, audit query/UI, export/retention, and asynchronous delivery remain
+deferred to later P5-02C scope.
 
 **Objective and scope:** Record security-significant administrative, identity,
 credential, policy/publication, server, OAuth-connection, and execution events

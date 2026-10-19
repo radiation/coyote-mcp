@@ -20,6 +20,7 @@ from coyote_mcp.audit import (
     AuditOutcome,
     AuditTargetType,
     record_audit_event,
+    record_independent_denial_event,
 )
 from coyote_mcp.auth import AuthenticatedPrincipal
 from coyote_mcp.db import get_session
@@ -30,6 +31,7 @@ from coyote_mcp.discovery import (
     reconcile_tools,
 )
 from coyote_mcp.models import (
+    AuditEvent,
     Collection,
     CollectionMembership,
     CollectionToolPublication,
@@ -180,6 +182,47 @@ async def test_postgres_audit_events_are_immutable_and_jsonb(
         await session.rollback()
 
     assert persisted_type == "jsonb"
+
+
+@pytest.mark.asyncio
+async def test_postgres_independent_denial_event_survives_request_rollback(
+    postgres_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    async with postgres_sessions() as setup_session:
+        organization = Organization(
+            slug="independent-denial-postgres",
+            display_name="Independent Denial PostgreSQL",
+        )
+        setup_session.add(organization)
+        await setup_session.commit()
+
+    async with postgres_sessions() as request_session:
+        request_principal = Principal(
+            identifier="rollback-only-principal",
+            display_name="Rollback Only Principal",
+        )
+        request_session.add(request_principal)
+        await request_session.flush()
+        await record_independent_denial_event(
+            request_session,
+            organization_id=organization.id,
+            action=AuditAction.AUTHENTICATION_FAILED,
+            target_type=AuditTargetType.AUTHENTICATION,
+            metadata={"auth_method": "pat", "failure_code": "revoked"},
+        )
+        await request_session.rollback()
+
+    async with postgres_sessions() as verify_session:
+        event = await verify_session.scalar(
+            select(AuditEvent).where(AuditEvent.action == AuditAction.AUTHENTICATION_FAILED.value)
+        )
+        rolled_back_principal = await verify_session.scalar(
+            select(Principal).where(Principal.identifier == "rollback-only-principal")
+        )
+
+    assert event is not None
+    assert event.organization_id == organization.id
+    assert rolled_back_principal is None
 
 
 @pytest.mark.asyncio

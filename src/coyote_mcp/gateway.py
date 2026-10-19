@@ -27,6 +27,12 @@ from referencing.exceptions import Unresolvable
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coyote_mcp.audit import (
+    AuditAction,
+    AuditActorType,
+    AuditTargetType,
+    record_independent_denial_event,
+)
 from coyote_mcp.auth import AuthenticatedPrincipal, authorized_collection_ids
 from coyote_mcp.credentials import (
     POLICY_PER_USER_OAUTH,
@@ -496,6 +502,22 @@ class GatewayService:
             action_ids = {collection.id for collection in collections}
             authorized_ids = action_ids if authorized_ids is None else authorized_ids & action_ids
         if not authorized_ids:
+            await record_independent_denial_event(
+                session,
+                organization_id=current.require_organization_id(),
+                action=AuditAction.AUTHORIZATION_DENIED,
+                target_type=AuditTargetType.AUTHORIZATION,
+                metadata={
+                    "action": sorted(required_actions)[0],
+                    "reason_code": "collection_access_denied",
+                },
+                actor_type=(
+                    AuditActorType.SERVICE
+                    if current.principal.identity_type == "service"
+                    else AuditActorType.HUMAN
+                ),
+                actor_id=current.principal.id,
+            )
             raise GatewayError("Collection endpoint is not available.")
         collection = next(
             (

@@ -25,6 +25,7 @@ from coyote_mcp.auth import (
     select_active_organization,
 )
 from coyote_mcp.models import (
+    AuditEvent,
     BrowserSession,
     Collection,
     ExternalGroup,
@@ -79,6 +80,48 @@ async def test_pat_authentication_revocation_and_disabled_principal(
     await session.commit()
     assert token.secret_hash not in plaintext
     assert await authenticate_token(session, plaintext) is None
+
+
+@pytest.mark.asyncio
+async def test_revoked_pat_authentication_is_independently_audited(
+    session: AsyncSession, organization: Organization
+) -> None:
+    principal = await create_principal(session, organization)
+    token, plaintext = await issue_pat(
+        session, principal, organization.id, "test", {"server:read"}, timedelta(days=1), Settings()
+    )
+    token.revoked_at = datetime.now(UTC)
+    await session.commit()
+
+    assert await authenticate_token(session, plaintext) is None
+
+    event = await session.scalar(
+        select(AuditEvent).where(AuditEvent.action == "authentication.failed")
+    )
+    assert event is not None
+    assert event.organization_id == organization.id
+    assert event.actor_id is None
+    assert event.metadata_ == {"auth_method": "pat", "failure_code": "revoked"}
+
+
+@pytest.mark.asyncio
+async def test_revoked_browser_session_is_independently_audited(
+    session: AsyncSession, organization: Organization
+) -> None:
+    principal = await create_principal(session, organization)
+    browser_session, token = await issue_browser_session(session, principal, [], Settings())
+    browser_session.active_organization_id = organization.id
+    browser_session.revoked_at = datetime.now(UTC)
+    await session.commit()
+
+    assert await authenticate_browser_session(session, token) is None
+
+    event = await session.scalar(
+        select(AuditEvent).where(AuditEvent.action == "authentication.failed")
+    )
+    assert event is not None
+    assert event.organization_id == organization.id
+    assert event.metadata_ == {"auth_method": "browser_session", "failure_code": "revoked"}
 
 
 @pytest.mark.asyncio

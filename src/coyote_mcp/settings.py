@@ -62,6 +62,14 @@ class Settings(BaseSettings):
     discovery_timeout_seconds: float = 15.0
     execution_timeout_seconds: float = 15.0
     schema_validation_timeout_seconds: float = 5.0
+    independent_audit_timeout_seconds: float = Field(
+        default=2.0,
+        gt=0,
+        validation_alias=AliasChoices(
+            "COYOTE_INDEPENDENT_AUDIT_TIMEOUT_SECONDS",
+            "INDEPENDENT_AUDIT_TIMEOUT_SECONDS",
+        ),
+    )
     max_native_tools_per_collection: int = Field(
         default=100,
         ge=1,

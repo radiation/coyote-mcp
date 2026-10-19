@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -5,9 +6,10 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from coyote_mcp import api
+from coyote_mcp import api, audit
 from coyote_mcp.app import app
 from coyote_mcp.auth import (
     ALL_ACTIONS,
@@ -18,6 +20,7 @@ from coyote_mcp.auth import (
 )
 from coyote_mcp.db import get_session
 from coyote_mcp.models import (
+    AuditEvent,
     InstanceAdministrator,
     Organization,
     OrganizationMembership,
@@ -152,6 +155,60 @@ async def test_require_rejects_organization_action_without_active_organization(
         current = AuthenticatedPrincipal(principal, frozenset({"server:read"}), None, None)
 
         with pytest.raises(HTTPException, match="active organization") as error:
+            await api.require(session, current, "server:read")
+
+    assert error.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_require_independently_audits_denied_authenticated_principal(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        organization = Organization(slug="denial-audit", display_name="Denial Audit")
+        principal = Principal(identifier="denial-audit", display_name="Denial Audit")
+        session.add_all([organization, principal])
+        await session.flush()
+        session.add(
+            OrganizationMembership(organization_id=organization.id, principal_id=principal.id)
+        )
+        await session.commit()
+        current = AuthenticatedPrincipal(principal, frozenset(), None, organization.id)
+
+        with pytest.raises(HTTPException):
+            await api.require(session, current, "server:read")
+
+        event = await session.scalar(
+            select(AuditEvent).where(AuditEvent.action == "authorization.denied")
+        )
+        assert event is not None
+        assert event.organization_id == organization.id
+        assert event.actor_id == principal.id
+        assert event.metadata_ == {"action": "server:read", "reason_code": "scope_not_granted"}
+
+
+@pytest.mark.asyncio
+async def test_require_preserves_denial_when_independent_audit_times_out(
+    session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def stalled_record(*_: object, **__: object) -> AuditEvent:
+        await asyncio.sleep(1)
+        raise AssertionError("The independent audit deadline did not cancel the write.")
+
+    monkeypatch.setenv("COYOTE_INDEPENDENT_AUDIT_TIMEOUT_SECONDS", "0.001")
+    monkeypatch.setattr(audit, "record_audit_event", stalled_record)
+    async with session_factory() as session:
+        organization = Organization(slug="denial-timeout", display_name="Denial Timeout")
+        principal = Principal(identifier="denial-timeout", display_name="Denial Timeout")
+        session.add_all([organization, principal])
+        await session.flush()
+        session.add(
+            OrganizationMembership(organization_id=organization.id, principal_id=principal.id)
+        )
+        await session.commit()
+        current = AuthenticatedPrincipal(principal, frozenset(), None, organization.id)
+
+        with pytest.raises(HTTPException) as error:
             await api.require(session, current, "server:read")
 
     assert error.value.status_code == 403

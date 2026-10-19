@@ -1,3 +1,4 @@
+import asyncio
 from uuid import uuid4
 
 import pytest
@@ -13,8 +14,10 @@ from coyote_mcp.audit import (
     AuditPersistenceError,
     AuditTargetType,
     record_audit_event,
+    record_independent_denial_event,
 )
 from coyote_mcp.models import AuditEvent, Organization, Principal
+from coyote_mcp.runtime import RequestID
 
 
 async def _principal(session: AsyncSession) -> Principal:
@@ -217,3 +220,77 @@ async def test_orm_rejects_audit_event_mutation_and_deletion(
     await session.delete(event)
     with pytest.raises(TypeError, match="append-only"):
         await session.flush()
+
+
+@pytest.mark.asyncio
+async def test_independent_denial_event_commits_with_request_correlation(
+    session: AsyncSession, organization: Organization
+) -> None:
+    token = RequestID.set("request-denial-123")
+    try:
+        await record_independent_denial_event(
+            session,
+            organization_id=organization.id,
+            action=AuditAction.AUTHENTICATION_FAILED,
+            target_type=AuditTargetType.AUTHENTICATION,
+            metadata={"auth_method": "pat", "failure_code": "revoked"},
+        )
+    finally:
+        RequestID.reset(token)
+
+    stored = await session.scalar(
+        select(AuditEvent).where(AuditEvent.action == AuditAction.AUTHENTICATION_FAILED.value)
+    )
+    assert stored is not None
+    assert stored.outcome == AuditOutcome.FAILURE.value
+    assert stored.actor_type == AuditActorType.SYSTEM.value
+    assert stored.request_id == "request-denial-123"
+    assert stored.metadata_ == {"auth_method": "pat", "failure_code": "revoked"}
+
+
+@pytest.mark.asyncio
+async def test_independent_denial_failure_does_not_raise(
+    session: AsyncSession, organization: Organization, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import coyote_mcp.audit as audit
+
+    async def failing_record(*_: object, **__: object) -> AuditEvent:
+        raise AuditPersistenceError("audit storage unavailable")
+
+    monkeypatch.setattr(audit, "record_audit_event", failing_record)
+    await record_independent_denial_event(
+        session,
+        organization_id=organization.id,
+        action=AuditAction.AUTHENTICATION_FAILED,
+        target_type=AuditTargetType.AUTHENTICATION,
+        metadata={"auth_method": "pat", "failure_code": "revoked"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_independent_denial_timeout_does_not_raise(
+    session: AsyncSession,
+    organization: Organization,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import coyote_mcp.audit as audit
+
+    async def stalled_record(*_: object, **__: object) -> AuditEvent:
+        await asyncio.sleep(1)
+        raise AssertionError("The independent audit deadline did not cancel the write.")
+
+    monkeypatch.setenv("COYOTE_INDEPENDENT_AUDIT_TIMEOUT_SECONDS", "0.001")
+    monkeypatch.setattr(audit, "record_audit_event", stalled_record)
+
+    await record_independent_denial_event(
+        session,
+        organization_id=organization.id,
+        action=AuditAction.AUTHENTICATION_FAILED,
+        target_type=AuditTargetType.AUTHENTICATION,
+        metadata={"auth_method": "pat", "failure_code": "revoked"},
+    )
+
+    assert (
+        "Independent audit event persistence timed out action=authentication.failed" in caplog.text
+    )

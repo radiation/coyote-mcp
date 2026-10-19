@@ -2,13 +2,17 @@
 
 ## Completed
 
-- **Phase 5 P5-02B:** Successful security-sensitive state mutations now write
+- **Phase 5 P5-02B/C1:** Successful security-sensitive state mutations now write
   tenant-scoped, actor-attributed, append-only audit events in their existing
   transactions. Coverage includes organization bootstrap, PATs, identity
   administration, server/collection/publication configuration, downstream
   authentication configuration, shared credentials, and Connected Apps. P5-02C
-  denial/failure/execution auditing, audit query/export/retention, and
-  asynchronous delivery remain deferred.
+  attributable PAT/browser authentication failures and centralized API,
+  console, and MCP collection authorization denials are independently
+  persisted without changing denied outcomes. Unattributable credentials and
+  pre-tenant OIDC failures remain sanitized operational logs because the audit
+  ledger is tenant-scoped. MCP execution outcomes, audit query/export/retention,
+  and asynchronous delivery remain deferred.
 - **Phase 1:** PostgreSQL-backed registration of Streamable HTTP MCP servers,
   generation-safe tool discovery, persisted catalog, and collections.
 - **Phase 2:** Organization-scoped roles and PATs; service principals;
@@ -161,14 +165,16 @@
   actor/target snapshots, correlation IDs, bounded allowlisted metadata, and
   PostgreSQL/ORM append-only enforcement. The transaction-owned audit service
   flushes without committing so later instrumentation can make security
-  mutations and evidence atomic. P5-02B/C instrumentation, audit reading,
-  export, and retention remain deferred.
+  mutations and evidence atomic. P5-02C1 independently commits attributable
+  denial/failure evidence and logs write failures without changing the original
+  denied response; audit reading, export, retention, and MCP execution outcomes
+  remain deferred.
 
 ## Next
 
-- **Phase 5 P5-02B/C:** Instrument sensitive successful mutations, then define
-  independent-write policy for denied/authentication/read-only/MCP outcome
-  events. Add query/export and retention policy only in their dedicated scope.
+- **Phase 5 P5-02C2:** Define read-only security activity and MCP execution
+  outcome audit policy. Add query/export and retention policy only in their
+  dedicated scope.
 - **Phase 3B:** Audit events, cancellation, and operational metrics for MCP
   execution, plus downstream authentication follow-ups (provider discovery,
   additional providers, and credential re-seal tooling).

@@ -22,6 +22,7 @@ from coyote_mcp.app import app
 from coyote_mcp.auth import AuthenticatedPrincipal, authenticate_token, issue_pat
 from coyote_mcp.gateway import GatewayError, GatewayService
 from coyote_mcp.models import (
+    AuditEvent,
     Collection,
     CollectionMembership,
     CollectionToolPublication,
@@ -253,6 +254,28 @@ async def test_gateway_scoped_discovery_description_and_schema_validation(
     assert global_description["collection_slug"] == "engineering"
     with pytest.raises(GatewayError, match="arguments"):
         await service.execute_tool(session, current, tool.id, {"issue": "invalid"}, "engineering")
+
+
+@pytest.mark.asyncio
+async def test_native_collection_denial_is_independently_audited(session: AsyncSession) -> None:
+    principal, _, _, organization = await _collection_consumer(session)
+    current = AuthenticatedPrincipal(
+        principal, frozenset({"tool:discover"}), None, organization.id, credential_context="pat"
+    )
+
+    with pytest.raises(GatewayError, match="Collection endpoint"):
+        await GatewayService(Settings()).native_tools(session, current, "engineering")
+
+    event = await session.scalar(
+        select(AuditEvent).where(AuditEvent.action == "authorization.denied")
+    )
+    assert event is not None
+    assert event.organization_id == organization.id
+    assert event.actor_id == principal.id
+    assert event.metadata_ == {
+        "action": "tool:discover",
+        "reason_code": "collection_access_denied",
+    }
 
 
 @pytest.mark.asyncio

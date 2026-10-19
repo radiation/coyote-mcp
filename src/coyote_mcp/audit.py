@@ -1,6 +1,8 @@
 """Tenant-scoped, append-only persistence for security audit events."""
 
+import asyncio
 import json
+import logging
 import re
 from collections.abc import Mapping
 from enum import StrEnum
@@ -12,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coyote_mcp.models import AuditEvent, Principal
 from coyote_mcp.runtime import request_id
+from coyote_mcp.settings import Settings
 
 type AuditMetadataValue = str | int | bool
 
@@ -19,7 +22,8 @@ _MAX_METADATA_FIELDS = 8
 _MAX_METADATA_BYTES = 1024
 _MAX_METADATA_KEY_LENGTH = 64
 _MAX_METADATA_STRING_LENGTH = 256
-_SAFE_METADATA_STRING = re.compile(r"[A-Za-z0-9][A-Za-z0-9._,-]{0,255}\Z")
+_SAFE_METADATA_STRING = re.compile(r"[A-Za-z0-9][A-Za-z0-9._,:-]{0,255}\Z")
+logger = logging.getLogger(__name__)
 
 
 class AuditActorType(StrEnum):
@@ -217,6 +221,59 @@ async def record_principal_audit_event(
         outcome=AuditOutcome.SUCCESS,
         metadata=metadata,
     )
+
+
+async def record_independent_denial_event(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    action: AuditAction,
+    target_type: AuditTargetType,
+    metadata: Mapping[str, AuditMetadataValue],
+    actor_type: AuditActorType = AuditActorType.SYSTEM,
+    actor_id: UUID | None = None,
+) -> None:
+    """Persist a denied or failed security event outside the request transaction.
+
+    This is intentionally best-effort: a failed audit write must not alter the
+    authentication or authorization decision that prompted it.
+    """
+    if session.bind is None:
+        logger.warning(
+            "Independent audit event was not persisted action=%s reason=unbound_session",
+            action.value,
+        )
+        return
+    try:
+        async with asyncio.timeout(Settings().independent_audit_timeout_seconds):
+            async with AsyncSession(bind=session.bind, expire_on_commit=False) as audit_session:
+                async with audit_session.begin():
+                    await record_audit_event(
+                        audit_session,
+                        organization_id=organization_id,
+                        actor_type=actor_type,
+                        actor_id=actor_id,
+                        action=action,
+                        target_type=target_type,
+                        target_id=None,
+                        outcome=(
+                            AuditOutcome.FAILURE
+                            if action is AuditAction.AUTHENTICATION_FAILED
+                            else AuditOutcome.DENIED
+                        ),
+                        metadata=metadata,
+                    )
+    except TimeoutError:
+        logger.warning(
+            "Independent audit event persistence timed out action=%s",
+            action.value,
+        )
+    except (AuditMetadataValidationError, AuditPersistenceError, SQLAlchemyError) as error:
+        logger.warning(
+            "Independent audit event persistence failed action=%s exception_class=%s",
+            action.value,
+            type(error).__name__,
+        )
 
 
 def _reject_audit_event_mutation(*_: object) -> None:
