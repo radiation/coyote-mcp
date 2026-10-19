@@ -2,7 +2,7 @@
 
 ## Completed
 
-- **Phase 5 P5-02B/C1/C2:** Successful security-sensitive state mutations now write
+- **Phase 5 P5-02:** Successful security-sensitive state mutations now write
   tenant-scoped, actor-attributed, append-only audit events in their existing
   transactions. Coverage includes organization bootstrap, PATs, identity
   administration, server/collection/publication configuration, downstream
@@ -15,8 +15,12 @@
   one bounded `mcp.execution` result with actor/tenant, correlation, tool/server
   UUIDs, stable category, and duration; it never persists tool data, credentials,
   headers, or downstream content. Audit write loss is a sanitized warning and
-  does not change or retry execution. Audit query/export/retention and
-  asynchronous delivery remain deferred.
+  does not change or retry execution. P5-02C3 adds the read-only
+  `/api/v1/audit-events` ledger API: organization owners and administrators
+  with `audit:read` receive only bounded, allowlist-filtered, keyset-paginated
+  pages from their active organization; service principals and MCP operations
+  cannot read it. P5-02 is implemented. Export, retention scheduling,
+  legal/incident-hold enforcement, and privileged purge remain P5-04 work.
 - **Phase 1:** PostgreSQL-backed registration of Streamable HTTP MCP servers,
   generation-safe tool discovery, persisted catalog, and collections.
 - **Phase 2:** Organization-scoped roles and PATs; service principals;
@@ -191,6 +195,6 @@
 
 - Downstream authentication for providers beyond GitHub, GitHub App support,
   and revocation for providers that offer it.
-- Execution cancellation, audit retention, and policy-enforcement contract.
+- Execution cancellation and policy-enforcement contract.
 - Search/indexing design and how it exposes only currently authorized tools.
-- Production operations: audit/event retention, metrics, and hardening scope.
+- Production operations: audit/event retention implementation, metrics, and hardening scope.

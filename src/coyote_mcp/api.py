@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,9 +11,17 @@ from coyote_mcp import catalog
 from coyote_mcp.audit import (
     AuditAction,
     AuditActorType,
+    AuditOutcome,
     AuditTargetType,
     record_independent_denial_event,
     record_principal_audit_event,
+)
+from coyote_mcp.audit_retrieval import (
+    AuditEventFilters,
+    AuditQueryValidationError,
+    AuditRetrievalAuthorizationError,
+    get_audit_event,
+    list_audit_events,
 )
 from coyote_mcp.auth import (
     ROLE_PERMISSIONS,
@@ -39,6 +47,8 @@ from coyote_mcp.models import (
     RoleAssignment,
 )
 from coyote_mcp.schemas import (
+    AuditEventPageResponse,
+    AuditEventResponse,
     CollectionCreate,
     CollectionDetailResponse,
     CollectionResponse,
@@ -132,6 +142,63 @@ async def _record_authorization_denial(
         ),
         actor_id=current.principal.id,
     )
+
+
+@router.get("/audit-events", response_model=AuditEventPageResponse)
+async def list_organization_audit_events(
+    session: Session,
+    current: Current,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    cursor: str | None = None,
+    occurred_after: datetime | None = None,
+    occurred_before: datetime | None = None,
+    action: AuditAction | None = None,
+    outcome: AuditOutcome | None = None,
+    actor_id: UUID | None = None,
+    target_type: AuditTargetType | None = None,
+    target_id: UUID | None = None,
+) -> AuditEventPageResponse:
+    await require(session, current, "audit:read")
+    try:
+        page_result = await list_audit_events(
+            session,
+            current,
+            limit=limit,
+            cursor=cursor,
+            filters=AuditEventFilters(
+                occurred_after=occurred_after,
+                occurred_before=occurred_before,
+                action=action,
+                outcome=outcome,
+                actor_id=actor_id,
+                target_type=target_type,
+                target_id=target_id,
+            ),
+        )
+    except (AuditQueryValidationError, AuditRetrievalAuthorizationError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+        ) from error
+    return AuditEventPageResponse(
+        events=[AuditEventResponse.model_validate(event) for event in page_result.events],
+        next_cursor=page_result.next_cursor,
+    )
+
+
+@router.get("/audit-events/{event_id}", response_model=AuditEventResponse)
+async def audit_event_details(
+    event_id: UUID, session: Session, current: Current
+) -> AuditEventResponse:
+    await require(session, current, "audit:read")
+    try:
+        event = await get_audit_event(session, current, event_id)
+    except AuditRetrievalAuthorizationError as error:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions."
+        ) from error
+    if event is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found.")
+    return AuditEventResponse.model_validate(event)
 
 
 @router.post("/servers", response_model=ServerResponse, status_code=status.HTTP_201_CREATED)

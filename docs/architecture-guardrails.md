@@ -84,6 +84,14 @@ that must preserve these invariants.
   security-sensitive mutation and its audit event commit or roll back together.
   Event types, outcomes, and metadata fields are allowlisted. Privileged
   database operators remain outside this application-level guarantee.
+- **Audit retrieval remains privileged, bounded, and tenant-local.** Only human
+  organization owners and administrators with the attenuated `audit:read`
+  permission may query approved audit fields. The read service re-evaluates
+  `auth.authorize`, anchors every query and event lookup to the authenticated
+  organization, and uses an opaque keyset cursor only as a position, never as
+  authorization. Service principals and MCP tool execution have no ledger-read
+  capability. Filters are allowlisted; arbitrary metadata predicates and raw
+  queries are not supported.
 - **MCP gateway operations are PAT-only, publication-gated, and authorization is current.** The
   Streamable HTTP endpoint at `/mcp` rejects absent, invalid, expired, revoked,
   and browser-session credentials. Discovery, description, and execution load

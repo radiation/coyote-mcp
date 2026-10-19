@@ -52,6 +52,7 @@ ALL_ACTIONS = frozenset(
         "credential:revoke",
         "connection:manage_own",
         "policy:manage",
+        "audit:read",
     }
 )
 ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
@@ -728,6 +729,8 @@ async def authorize(
         return Decision(False, "unknown_action")
     if not principal.enabled:
         return Decision(False, "principal_disabled")
+    if action == "audit:read" and principal.identity_type == "service":
+        return Decision(False, "service_principal_not_permitted")
     if resource is None:
         organization_id = context.get("organization_id") if context else None
         collection_id: UUID | None = None

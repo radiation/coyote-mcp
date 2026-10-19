@@ -10,6 +10,26 @@ class Page(BaseModel):
     offset: int = Field(default=0, ge=0)
 
 
+class AuditEventResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    occurred_at: datetime
+    actor_id: UUID | None
+    actor_type: str
+    action: str
+    target_type: str
+    target_id: UUID | None
+    outcome: str
+    request_id: str | None
+    metadata: dict[str, str | int | bool] = Field(validation_alias="metadata_")
+
+
+class AuditEventPageResponse(BaseModel):
+    events: list[AuditEventResponse]
+    next_cursor: str | None
+
+
 class OrganizationCreate(BaseModel):
     slug: str = Field(min_length=1, max_length=160, pattern=r"^[a-z0-9][a-z0-9-]*$")
     display_name: str = Field(min_length=1, max_length=160)

@@ -1,6 +1,7 @@
 import asyncio
 import os
 from collections.abc import AsyncIterator, Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -22,6 +23,7 @@ from coyote_mcp.audit import (
     record_audit_event,
     record_independent_denial_event,
 )
+from coyote_mcp.audit_retrieval import AuditEventFilters, list_audit_events
 from coyote_mcp.auth import AuthenticatedPrincipal
 from coyote_mcp.db import get_session
 from coyote_mcp.discovery import (
@@ -142,6 +144,150 @@ async def test_postgres_migration_and_jsonb_persistence(
         )
 
     assert persisted_type == "jsonb"
+
+
+@pytest.mark.asyncio
+async def test_postgres_audit_retrieval_keyset_index_exists(
+    postgres_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    async with postgres_sessions() as session:
+        index_name = await session.scalar(
+            text(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE schemaname = current_schema() "
+                "AND tablename = 'audit_events' "
+                "AND indexname = 'ix_audit_events_organization_occurred_at_id'"
+            )
+        )
+
+    assert index_name == "ix_audit_events_organization_occurred_at_id"
+
+
+@pytest.mark.asyncio
+async def test_postgres_audit_retrieval_is_tenant_scoped_and_historical(
+    postgres_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    async with postgres_sessions() as session:
+        organization = Organization(slug="audit-retrieval", display_name="Audit Retrieval")
+        other_organization = Organization(
+            slug="audit-retrieval-other", display_name="Audit Retrieval Other"
+        )
+        auditor = Principal(identifier="audit-retrieval-auditor", display_name="Auditor")
+        historical_actor = Principal(identifier="audit-retrieval-actor", display_name="Actor")
+        other_auditor = Principal(identifier="audit-retrieval-other-auditor", display_name="Other")
+        session.add_all(
+            [organization, other_organization, auditor, historical_actor, other_auditor]
+        )
+        await session.flush()
+        session.add_all(
+            [
+                OrganizationMembership(organization_id=organization.id, principal_id=auditor.id),
+                OrganizationMembership(
+                    organization_id=organization.id, principal_id=historical_actor.id
+                ),
+                OrganizationMembership(
+                    organization_id=other_organization.id, principal_id=other_auditor.id
+                ),
+                RoleAssignment(
+                    organization_id=organization.id, principal_id=auditor.id, role="owner"
+                ),
+                RoleAssignment(
+                    organization_id=other_organization.id,
+                    principal_id=other_auditor.id,
+                    role="owner",
+                ),
+            ]
+        )
+        occurred_at = datetime(2026, 10, 19, 12, tzinfo=UTC)
+        oldest_event = AuditEvent(
+            id=UUID(int=1),
+            occurred_at=occurred_at,
+            organization_id=organization.id,
+            actor_id=historical_actor.id,
+            actor_type=AuditActorType.HUMAN.value,
+            action=AuditAction.SERVER_CREATED.value,
+            target_type=AuditTargetType.SERVER.value,
+            target_id=None,
+            outcome=AuditOutcome.SUCCESS.value,
+            metadata_={},
+        )
+        second_event = AuditEvent(
+            id=UUID(int=2),
+            occurred_at=occurred_at + timedelta(seconds=1),
+            organization_id=organization.id,
+            actor_id=auditor.id,
+            actor_type=AuditActorType.HUMAN.value,
+            action=AuditAction.SERVER_CREATED.value,
+            target_type=AuditTargetType.SERVER.value,
+            target_id=None,
+            outcome=AuditOutcome.SUCCESS.value,
+            metadata_={},
+        )
+        newest_event = AuditEvent(
+            id=UUID(int=3),
+            occurred_at=occurred_at + timedelta(seconds=2),
+            organization_id=organization.id,
+            actor_id=auditor.id,
+            actor_type=AuditActorType.HUMAN.value,
+            action=AuditAction.SERVER_CREATED.value,
+            target_type=AuditTargetType.SERVER.value,
+            target_id=None,
+            outcome=AuditOutcome.SUCCESS.value,
+            metadata_={},
+        )
+        other_event = AuditEvent(
+            id=UUID(int=4),
+            occurred_at=occurred_at,
+            organization_id=other_organization.id,
+            actor_id=other_auditor.id,
+            actor_type=AuditActorType.HUMAN.value,
+            action=AuditAction.SERVER_CREATED.value,
+            target_type=AuditTargetType.SERVER.value,
+            target_id=None,
+            outcome=AuditOutcome.SUCCESS.value,
+            metadata_={},
+        )
+        session.add_all([oldest_event, second_event, newest_event, other_event])
+        await session.commit()
+
+        current = AuthenticatedPrincipal(auditor, frozenset({"audit:read"}), None, organization.id)
+        first_page = await list_audit_events(session, current, limit=2)
+        assert [event.id for event in first_page.events] == [newest_event.id, second_event.id]
+        assert first_page.next_cursor is not None
+
+        session.add(
+            AuditEvent(
+                id=UUID(int=5),
+                occurred_at=occurred_at + timedelta(seconds=3),
+                organization_id=organization.id,
+                actor_id=auditor.id,
+                actor_type=AuditActorType.HUMAN.value,
+                action=AuditAction.SERVER_CREATED.value,
+                target_type=AuditTargetType.SERVER.value,
+                target_id=None,
+                outcome=AuditOutcome.SUCCESS.value,
+                metadata_={},
+            )
+        )
+        await session.commit()
+        second_page = await list_audit_events(session, current, cursor=first_page.next_cursor)
+        assert [event.id for event in second_page.events] == [oldest_event.id]
+
+        historical_actor_id = historical_actor.id
+        await session.delete(historical_actor)
+        await session.commit()
+        historical_page = await list_audit_events(
+            session,
+            current,
+            filters=AuditEventFilters(actor_id=historical_actor_id),
+        )
+        assert [event.id for event in historical_page.events] == [oldest_event.id]
+
+        other_current = AuthenticatedPrincipal(
+            other_auditor, frozenset({"audit:read"}), None, other_organization.id
+        )
+        other_page = await list_audit_events(session, other_current, cursor=first_page.next_cursor)
+        assert [event.id for event in other_page.events] == [other_event.id]
 
 
 @pytest.mark.asyncio

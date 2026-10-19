@@ -315,8 +315,8 @@ and migration documentation. Complexity: **M**.
 
 ### P5-02 - Append-only security audit events (L)
 
-**P5-02A status: implemented on 2026-10-19. P5-02B status: implemented on
-2026-10-19.** Migration `0021` adds the
+**P5-02A, P5-02B, and P5-02C1/C2/C3 status: implemented on 2026-10-19.**
+Migration `0021` adds the
 tenant-scoped append-only audit ledger, and `audit.record_audit_event` writes
 validated events through the caller's existing transaction. PostgreSQL triggers
 reject updates and deletes; SQLAlchemy also rejects ordinary ORM mutation.
@@ -371,8 +371,34 @@ excluded. This uses the existing short-lived, two-second bounded independent
 transaction. Audit-write timeout/failure logs a sanitized warning and never
 changes the execution result, failure classification, cancellation, or
 no-retry policy. This deliberately provides best-effort durability and one
-write per execution decision; high-volume capacity management, audit query/UI,
-export, retention, and asynchronous delivery remain deferred.
+write per execution decision; high-volume capacity management and asynchronous
+delivery remain deferred.
+
+P5-02C3 adds the read-only `GET /api/v1/audit-events` and
+`GET /api/v1/audit-events/{event_id}` administrative contract. The dedicated
+service always predicates on the authenticated active organization and
+re-evaluates centralized `audit:read` authorization; client input cannot select
+another organization. Only human owners and administrators receive the
+organization-wide permission, with PAT scopes still attenuating access.
+Service principals, collection-scoped roles, and normal MCP execution do not
+receive it. Lists accept only validated time, enum, immutable actor UUID, and
+target filters, are limited to 100 records, and use newest-first
+`(occurred_at, id)` keyset cursors. The composite PostgreSQL index is added by
+`0023`; a cursor is a position rather than a tenant credential, so cross-tenant
+cursor reuse cannot disclose events. Responses contain approved event fields
+and writer-validated scalar metadata only.
+
+The initial operational retention recommendations are configurable rather than
+regulatory claims: 365 days for security/admin mutations, 180 days for
+authentication/authorization denials, and 90 days for high-volume MCP
+execution outcomes. Hold requirements override purge eligibility. P5-04 owns
+the privileged, batched, observable purge interface; it must preserve the
+ordinary-role append-only trigger guarantee, check incident/legal holds, and
+coordinate with PostgreSQL backup/PITR, restore validation, storage/index
+monitoring, and historical credential-key recovery. P5-02 implements no
+deletion, archive, scheduler, audit UI, or bulk export. Future export must
+reuse human `audit:read`, organization-only scope, bounded windows/counts, safe
+field selection, and export-accountability events.
 
 **Objective and scope:** Record security-significant administrative, identity,
 credential, policy/publication, server, OAuth-connection, and execution events

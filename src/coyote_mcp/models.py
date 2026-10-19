@@ -84,6 +84,12 @@ class AuditEvent(Base):
             name="ck_audit_events_outcome",
         ),
         Index("ix_audit_events_organization_occurred_at", "organization_id", "occurred_at"),
+        Index(
+            "ix_audit_events_organization_occurred_at_id",
+            "organization_id",
+            "occurred_at",
+            "id",
+        ),
         Index("ix_audit_events_organization_target", "organization_id", "target_type", "target_id"),
     )
 

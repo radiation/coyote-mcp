@@ -319,3 +319,63 @@ Cancellation propagates normally. This is best-effort audit durability, so an
 execution may complete when its event cannot be persisted. No sampling is
 implemented; high-volume deployments should size database capacity accordingly.
 Query/export, retention, and purge remain deferred.
+
+### Audit retrieval, retention, and future export
+
+`GET /api/v1/audit-events` and `GET /api/v1/audit-events/{event_id}` are
+read-only administrative endpoints. `audit:read` is deliberately granted only
+by organization-wide `owner` and `administrator` roles; it is not available
+from a collection-scoped role. A PAT must include that scope and still pass
+current role evaluation. Browser-session instance administrators retain the
+centralized browser-only override. Service principals are categorically denied
+this action even if assigned an otherwise privileged role, and MCP protocol
+operations do not expose the ledger.
+
+The service, not only the route, fixes each list and detail query to the
+authenticated active organization and calls `auth.authorize`. It never accepts
+an organization ID. A cursor contains only a validated timestamp and event UUID
+position; it is not an authorization credential, and an otherwise valid cursor
+from another organization cannot widen the mandatory organization predicate.
+Lists are newest first by `(occurred_at DESC, id DESC)`, return at most 100
+records, and use the last record as a keyset boundary so inserts after a first
+page do not shift later pages. Supported filters are timezone-aware time bounds,
+allowlisted action/outcome/target type, immutable actor UUID, and target UUID.
+Actor filtering remains available after the originating principal is removed.
+There is no raw SQL, offset, metadata-expression, or
+cross-organization filtering capability. Responses omit organization IDs,
+credentials, endpoints, exception data, and untrusted raw objects; the only
+metadata returned is the audit writer's scalar allowlist.
+
+Cursors deliberately do not bind filters cryptographically or retain server-side
+query state. Reusing one with changed filters can therefore produce a different
+or shorter result window, but cannot change the organization predicate, relax
+the current authorization decision, or disclose another tenant's records.
+
+Retention is an operational policy, not a statement of regulatory compliance.
+The initial recommendations are configurable 365-day retention for
+security/administrative mutations, 180 days for authentication and
+authorization denials, and 90 days for high-volume `mcp.execution` events.
+Incident and legal holds must make affected evidence ineligible for purge and
+must be considered before modifying any schedule. Ordinary application users
+cannot update or delete audit rows. P5-04 must implement any purge as a
+separately authorized, batched, observable privileged operation: PostgreSQL's
+append-only trigger must remain effective for application roles, with any
+narrow retention-only exception enforced inside a controlled database function
+or equivalently constrained operator path after hold checks. No deletion,
+archival, retention job, or scheduler exists today.
+
+The `(organization_id, occurred_at, id)` index supports the retrieval order;
+the existing organization-target index supports target filters. Operators must
+monitor high-volume execution-event storage, index growth, vacuum behavior, and
+query latency before setting retention. PostgreSQL backups, PITR, and restore
+tests must include audit rows, index definitions, hold state once implemented,
+and the corresponding historical credential-key recovery material. P5-04 owns
+the backup/recovery and purge runbooks.
+
+A future bulk export must require the same human `audit:read` policy, remain
+organization-only, enforce explicit bounded time windows and record counts,
+and expose only the same approved scalar fields. It must record requester,
+organization, selected window/field set, count, and completion/failure as
+accountability evidence without recording exported contents. Export design must
+also account for retention, holds, privacy/redaction obligations, secure
+delivery, and auditability. No CSV/JSON export or streaming path is implemented.
