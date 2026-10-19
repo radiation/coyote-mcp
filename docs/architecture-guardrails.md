@@ -77,6 +77,13 @@ that must preserve these invariants.
 - **Migrations are release-owned.** Application replicas never run Alembic on
   startup. A singleton deployment release operation applies the additive
   migration history before application rollout.
+- **Security audit evidence is tenant-scoped and append-only.** Audit events
+  retain actor and target UUID snapshots without foreign keys, so later deletion
+  cannot erase history. PostgreSQL triggers and ORM hooks reject updates and
+  deletes; records are inserted through a caller-owned transaction so a
+  security-sensitive mutation and its audit event commit or roll back together.
+  Event types, outcomes, and metadata fields are allowlisted. Privileged
+  database operators remain outside this application-level guarantee.
 - **MCP gateway operations are PAT-only, publication-gated, and authorization is current.** The
   Streamable HTTP endpoint at `/mcp` rejects absent, invalid, expired, revoked,
   and browser-session credentials. Discovery, description, and execution load

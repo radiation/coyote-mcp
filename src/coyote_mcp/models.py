@@ -43,6 +43,68 @@ class Organization(Base):
     )
 
 
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+    __table_args__ = (
+        CheckConstraint(
+            "actor_type IN ('human', 'service', 'system')",
+            name="ck_audit_events_actor_type",
+        ),
+        CheckConstraint(
+            "(actor_type = 'system' AND actor_id IS NULL) OR "
+            "(actor_type IN ('human', 'service') AND actor_id IS NOT NULL)",
+            name="ck_audit_events_actor",
+        ),
+        CheckConstraint(
+            "action IN ("
+            "'organization.created', "
+            "'server.created', 'server.updated', 'server.enabled', 'server.disabled', "
+            "'server.deleted', 'server.sync', "
+            "'collection.created', 'collection.updated', 'collection.enabled', "
+            "'collection.disabled', 'collection.membership_added', "
+            "'collection.membership_removed', "
+            "'publication.created', 'publication.updated', 'publication.deleted', "
+            "'credential.created', 'credential.revoked', "
+            "'connection.started', 'connection.connected', 'connection.disconnected', "
+            "'policy.updated', 'authentication.failed', 'authorization.denied', "
+            "'mcp.execution'"
+            ")",
+            name="ck_audit_events_action",
+        ),
+        CheckConstraint(
+            "target_type IN ("
+            "'organization', 'principal', 'server', 'collection', 'publication', "
+            "'credential', 'connection', 'policy', 'authentication', 'authorization', 'mcp_tool'"
+            ")",
+            name="ck_audit_events_target_type",
+        ),
+        CheckConstraint(
+            "outcome IN ('success', 'denied', 'failure')",
+            name="ck_audit_events_outcome",
+        ),
+        Index("ix_audit_events_organization_occurred_at", "organization_id", "occurred_at"),
+        Index("ix_audit_events_organization_target", "organization_id", "target_type", "target_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    actor_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), index=True)
+    actor_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    target_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), index=True)
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False)
+    request_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    metadata_: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSONBType, nullable=False, default=dict
+    )
+
+
 class MCPServer(Base):
     __tablename__ = "servers"
     __table_args__ = (

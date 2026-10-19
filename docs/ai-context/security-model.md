@@ -227,5 +227,35 @@ request headers. The configured response-size limit is applied immediately
 after FastMCP materializes a result. Its current public client transport does
 not provide a compatible streaming response-limit hook.
 
-There are no audit events, execution cancellation, or fine-grained per-tool deny
-policies yet. Tool annotations never establish safety.
+## Security audit events
+
+Migration `0021` provides a durable PostgreSQL audit ledger. Every row has an
+organization ID, timestamp, actor snapshot, controlled action/outcome, target
+snapshot, optional request ID, and allowlisted JSONB metadata. Actor and target
+IDs intentionally have no foreign keys: deleting an originating principal or
+target cannot rewrite or erase historical evidence. The organization reference
+uses `RESTRICT`, and tenant-scoped readers must always predicate events by that
+organization ID.
+
+`audit.record_audit_event` accepts the caller's `AsyncSession`, flushes but
+never commits, and propagates an `AuditPersistenceError`. A security-sensitive
+mutation that emits an event through this service therefore commits atomically
+with its event or rolls back both. The service accepts only enum-backed event
+names/outcomes and per-event scalar metadata allowlists; it rejects arbitrary
+objects, unsupported fields, and oversized content before storage. It never
+automatically serializes exception text, credentials, bearer tokens, OAuth
+codes, headers, request bodies, or downstream payloads.
+
+Both the ORM and PostgreSQL triggers reject updates and deletes. This protects
+against accidental application writes and ordinary database roles; it does not
+prevent a privileged database operator from disabling triggers, changing the
+schema, or directly altering data. Retention is intentionally deferred to a
+separately authorized future policy.
+
+P5-02A does not yet emit application-wide events. P5-02B must instrument
+successful security-sensitive mutations through their existing transactions.
+P5-02C must define explicit independent-write policy for authorization denials,
+authentication failures, MCP outcomes, and read-only security events that occur
+outside a mutation transaction. Execution cancellation and fine-grained
+per-tool deny policies remain unimplemented. Tool annotations never establish
+safety.

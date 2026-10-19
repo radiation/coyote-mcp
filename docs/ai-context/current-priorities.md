@@ -149,11 +149,19 @@
   job and loopback-only application port. Trusted proxy middleware accepts
   forwarding/request IDs only from configured networks, and app shutdown
   disposes the database engine after FastMCP lifespan shutdown.
+- **Phase 5 P5-02A durable audit foundation:** Migration `0021` adds
+  organization-scoped immutable audit events with controlled event taxonomy,
+  actor/target snapshots, correlation IDs, bounded allowlisted metadata, and
+  PostgreSQL/ORM append-only enforcement. The transaction-owned audit service
+  flushes without committing so later instrumentation can make security
+  mutations and evidence atomic. P5-02B/C instrumentation, audit reading,
+  export, and retention remain deferred.
 
 ## Next
 
-- **Phase 5 P5-02:** Append-only, tenant-scoped security audit events and
-  retention contract for sensitive administrative, credential, and MCP actions.
+- **Phase 5 P5-02B/C:** Instrument sensitive successful mutations, then define
+  independent-write policy for denied/authentication/read-only/MCP outcome
+  events. Add query/export and retention policy only in their dedicated scope.
 - **Phase 3B:** Audit events, cancellation, and operational metrics for MCP
   execution, plus downstream authentication follow-ups (provider discovery,
   additional providers, and credential re-seal tooling).

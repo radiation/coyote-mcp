@@ -9,11 +9,18 @@ import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from coyote_mcp import catalog, oidc
 from coyote_mcp.app import app
+from coyote_mcp.audit import (
+    AuditAction,
+    AuditActorType,
+    AuditOutcome,
+    AuditTargetType,
+    record_audit_event,
+)
 from coyote_mcp.auth import AuthenticatedPrincipal
 from coyote_mcp.db import get_session
 from coyote_mcp.discovery import (
@@ -131,6 +138,46 @@ async def test_postgres_migration_and_jsonb_persistence(
             text("SELECT pg_typeof(input_schema)::text FROM tools WHERE id = :id"),
             {"id": tool.id},
         )
+
+    assert persisted_type == "jsonb"
+
+
+@pytest.mark.asyncio
+async def test_postgres_audit_events_are_immutable_and_jsonb(
+    postgres_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    async with postgres_sessions() as session:
+        organization = Organization(slug="audit-postgres", display_name="Audit PostgreSQL")
+        session.add(organization)
+        await session.flush()
+        event = await record_audit_event(
+            session,
+            organization_id=organization.id,
+            actor_type=AuditActorType.SYSTEM,
+            actor_id=None,
+            action=AuditAction.SERVER_SYNC,
+            target_type=AuditTargetType.SERVER,
+            target_id=uuid4(),
+            outcome=AuditOutcome.SUCCESS,
+            metadata={"result_code": "ok", "tool_count": 2},
+        )
+        await session.commit()
+        event_id = event.id
+        persisted_type = await session.scalar(
+            text("SELECT pg_typeof(metadata)::text FROM audit_events WHERE id = :id"),
+            {"id": event_id},
+        )
+        with pytest.raises(DBAPIError) as update_error:
+            await session.execute(
+                text("UPDATE audit_events SET outcome = 'failure' WHERE id = :id"),
+                {"id": event_id},
+            )
+        assert update_error.value.orig.sqlstate == "P0001"
+        await session.rollback()
+        with pytest.raises(DBAPIError) as delete_error:
+            await session.execute(text("DELETE FROM audit_events WHERE id = :id"), {"id": event_id})
+        assert delete_error.value.orig.sqlstate == "P0001"
+        await session.rollback()
 
     assert persisted_type == "jsonb"
 

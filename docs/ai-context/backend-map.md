@@ -5,6 +5,7 @@
 | Area | Current responsibility |
 | --- | --- |
 | `app.py` | Builds FastAPI/FastMCP applications, mounts REST/OIDC routes, authenticates PAT-only MCP requests, and serves global plus request-scoped collection MCP endpoints. |
+| `audit.py` | Central append-only audit-event persistence service. It validates enum-backed actions and bounded allowlisted metadata, adds and flushes events in a caller-owned transaction, and never commits independently. |
 | `console.py` | Server-rendered `/console` routes. Resolves browser sessions only, persists selection/switching of an active organization server-side with CSRF protection, and reuses centralized authorization for organization-scoped pages. `GET /console/organizations` always renders the selector for an authenticated browser session, including sessions with an active organization. Instance administrators can select any enabled organization and create departments. Server, collection, membership, and tool-publication pages delegate all state changes to `catalog.py` services. |
 | `api.py` | Authenticated control-plane endpoints for catalog, PATs, service principals, groups, and mappings. |
 | `catalog.py` | Organization-scoped server, collection, membership, catalog, and collection tool-publication queries and mutations. Publication services check for alias and tool conflicts, use savepoints for constraint violations, and bound list queries. |
@@ -18,7 +19,7 @@
 | `auth.py` | PAT/browser authentication, immutable authenticated organization context, session lifecycle, memberships, roles, group mappings, browser-session-only instance-admin authorization, organization creation, and batched collection-grant evaluation. |
 | `oidc.py` | Settings-configured single-provider OIDC discovery, PKCE login, browser binding, code exchange, ID-token validation, and logout/CSRF flows. |
 | `security.py` | Destination, public-address, scheme, and OIDC trust-boundary validation. |
-| `models.py` | SQLAlchemy persistence model and tenant-scoped constraints. |
+| `models.py` | SQLAlchemy persistence model and tenant-scoped constraints, including immutable audit-event schema constraints. |
 | `schemas.py` | Pydantic API request/response contracts. |
 | `db.py`, `settings.py`, `runtime.py` | Async database session factory and shutdown disposal; development-compatible but fail-closed production settings; trusted-proxy forwarding, host validation, canonical public origin, and request correlation. |
 | `cli.py` | Operator-only trusted issuer/subject binding for instance-administrator bootstrap and recovery; it never issues a PAT or browser session. |

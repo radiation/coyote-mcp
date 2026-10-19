@@ -315,6 +315,15 @@ and migration documentation. Complexity: **M**.
 
 ### P5-02 - Append-only security audit events (L)
 
+**P5-02A status: implemented on 2026-10-19.** Migration `0021` adds the
+tenant-scoped append-only audit ledger, and `audit.record_audit_event` writes
+validated events through the caller's existing transaction. PostgreSQL triggers
+reject updates and deletes; SQLAlchemy also rejects ordinary ORM mutation.
+Audit records retain actor and target UUID snapshots without foreign keys, so
+they remain interpretable if a principal or target is later removed. Event names,
+outcomes, actor types, target types, and compact metadata fields are allowlisted.
+The remaining P5-02 instrumentation is deliberately deferred.
+
 **Objective and scope:** Record security-significant administrative, identity,
 credential, policy/publication, server, OAuth-connection, and execution events
 without persisting secrets or downstream payloads.
