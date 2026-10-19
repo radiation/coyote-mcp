@@ -2,7 +2,7 @@
 
 ## Completed
 
-- **Phase 5 P5-02B/C1:** Successful security-sensitive state mutations now write
+- **Phase 5 P5-02B/C1/C2:** Successful security-sensitive state mutations now write
   tenant-scoped, actor-attributed, append-only audit events in their existing
   transactions. Coverage includes organization bootstrap, PATs, identity
   administration, server/collection/publication configuration, downstream
@@ -11,8 +11,12 @@
   console, and MCP collection authorization denials are independently
   persisted without changing denied outcomes. Unattributable credentials and
   pre-tenant OIDC failures remain sanitized operational logs because the audit
-  ledger is tenant-scoped. MCP execution outcomes, audit query/export/retention,
-  and asynchronous delivery remain deferred.
+  ledger is tenant-scoped. `GatewayService.execute_tool` independently records
+  one bounded `mcp.execution` result with actor/tenant, correlation, tool/server
+  UUIDs, stable category, and duration; it never persists tool data, credentials,
+  headers, or downstream content. Audit write loss is a sanitized warning and
+  does not change or retry execution. Audit query/export/retention and
+  asynchronous delivery remain deferred.
 - **Phase 1:** PostgreSQL-backed registration of Streamable HTTP MCP servers,
   generation-safe tool discovery, persisted catalog, and collections.
 - **Phase 2:** Organization-scoped roles and PATs; service principals;
@@ -172,9 +176,8 @@
 
 ## Next
 
-- **Phase 5 P5-02C2:** Define read-only security activity and MCP execution
-  outcome audit policy. Add query/export and retention policy only in their
-  dedicated scope.
+- **Phase 5 P5-02C3:** Define any remaining read-only security activity policy.
+  Add query/export and retention policy only in their dedicated scope.
 - **Phase 3B:** Audit events, cancellation, and operational metrics for MCP
   execution, plus downstream authentication follow-ups (provider discovery,
   additional providers, and credential re-seal tooling).

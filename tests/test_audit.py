@@ -14,6 +14,7 @@ from coyote_mcp.audit import (
     AuditPersistenceError,
     AuditTargetType,
     record_audit_event,
+    record_independent_audit_event,
     record_independent_denial_event,
 )
 from coyote_mcp.models import AuditEvent, Organization, Principal
@@ -294,3 +295,37 @@ async def test_independent_denial_timeout_does_not_raise(
     assert (
         "Independent audit event persistence timed out action=authentication.failed" in caplog.text
     )
+
+
+@pytest.mark.asyncio
+async def test_independent_audit_write_preserves_cancellation(
+    session: AsyncSession, organization: Organization, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import coyote_mcp.audit as audit
+
+    started = asyncio.Event()
+
+    async def stalled_record(*_: object, **__: object) -> AuditEvent:
+        started.set()
+        await asyncio.sleep(1)
+        raise AssertionError("The task should have been cancelled.")
+
+    monkeypatch.setattr(audit, "record_audit_event", stalled_record)
+    task = asyncio.create_task(
+        record_independent_audit_event(
+            session,
+            organization_id=organization.id,
+            actor_type=AuditActorType.SYSTEM,
+            actor_id=None,
+            action=AuditAction.MCP_EXECUTION,
+            target_type=AuditTargetType.MCP_TOOL,
+            target_id=uuid4(),
+            outcome=AuditOutcome.SUCCESS,
+            metadata={"execution_code": "success", "duration_ms": 1},
+        )
+    )
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task

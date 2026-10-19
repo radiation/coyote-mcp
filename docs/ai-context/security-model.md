@@ -296,4 +296,26 @@ operational logging and never changes an authentication failure or
 authorization denial into success; parent-request cancellation still
 propagates normally. Successful privileged mutations retain the
 P5-02B caller-transaction, fail-closed guarantee; they do not use this path.
-MCP execution-outcome auditing remains deferred.
+### MCP execution-outcome auditing
+
+P5-02C2 records one `mcp.execution` event at the terminal
+`GatewayService.execute_tool` boundary. The event uses the authenticated human
+or service actor and its organization, the request correlation ID, the
+persisted tool UUID as target, and the persisted server UUID in bounded
+metadata. Its stable categories are `success`, `authorization_denied`,
+`invalid_input`, `downstream_authentication_failure`, `downstream_timeout`,
+`downstream_transport_failure`, `invalid_downstream_response`, and
+`internal_failure`; the audit outcome is respectively `success`, `denied`, or
+`failure`.
+
+Execution event metadata is restricted to the category, integer duration, and
+server UUID. It never stores tool arguments, results, raw protocol payloads,
+tokens, credentials, authorization headers, exception strings, or downstream
+error content. Writes reuse the independent two-second bounded transaction and
+database pool. A timeout or persistence failure is a sanitized operational
+warning only: it does not change the execution response, alter its failure
+classification, retry the downstream call, or buffer work asynchronously.
+Cancellation propagates normally. This is best-effort audit durability, so an
+execution may complete when its event cannot be persisted. No sampling is
+implemented; high-volume deployments should size database capacity accordingly.
+Query/export, retention, and purge remain deferred.

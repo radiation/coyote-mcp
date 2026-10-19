@@ -120,6 +120,15 @@ that must preserve these invariants.
   4.1.0 does not expose a response-stream interception hook compatible with its
   Streamable HTTP client, so the result-size bound is enforced immediately after
   FastMCP deserializes the result rather than while its response body streams.
+- **MCP execution audit evidence is bounded and best-effort.** The single
+  `GatewayService.execute_tool` execution boundary emits at most one
+  `mcp.execution` event per decision, after it has a terminal classification.
+  It records the authenticated actor and organization, request correlation,
+  tool and server UUIDs, a controlled outcome/category, and duration only.
+  It never records arguments, results, headers, credentials, or downstream
+  error text. The independent bounded audit transaction cannot retry a tool
+  call or change its result when persistence is unavailable; it emits a
+  sanitized operational warning instead.
 - **MCP network work does not hold registry read transactions.** Execution
   snapshots authorization and routing data in a dedicated short-lived session,
   which closes before validation or downstream network I/O. It does not commit

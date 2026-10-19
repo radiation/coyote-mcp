@@ -358,9 +358,21 @@ sanitized operational logging makes evidence loss visible. The tenant-required
 schema intentionally leaves malformed or unrecognized credentials,
 unaffiliated sessions, pre-tenant OIDC failures, and non-disclosing
 cross-organization not-found responses out of the ledger rather than assigning
-an arbitrary organization. MCP execution outcomes, broader read-only security
-activity, audit query/UI, export/retention, and asynchronous delivery remain
-deferred to later P5-02C scope.
+an arbitrary organization.
+
+P5-02C2 independently persists one `mcp.execution` outcome at the terminal
+`GatewayService.execute_tool` boundary: success, authorization denial, invalid
+input/schema, downstream authentication failure, timeout, transport failure,
+invalid/oversized response, or internal failure. The event contains only the
+authenticated actor/tenant, request ID, tool target UUID, server UUID, stable
+category, and duration. Tool arguments/results, downstream payloads, headers,
+credentials/tokens, exception strings, and arbitrary downstream content are
+excluded. This uses the existing short-lived, two-second bounded independent
+transaction. Audit-write timeout/failure logs a sanitized warning and never
+changes the execution result, failure classification, cancellation, or
+no-retry policy. This deliberately provides best-effort durability and one
+write per execution decision; high-volume capacity management, audit query/UI,
+export, retention, and asynchronous delivery remain deferred.
 
 **Objective and scope:** Record security-significant administrative, identity,
 credential, policy/publication, server, OAuth-connection, and execution events

@@ -121,7 +121,7 @@ _METADATA_FIELDS: dict[AuditAction, frozenset[str]] = {
     AuditAction.POLICY_UPDATED: frozenset({"changed_fields"}),
     AuditAction.AUTHENTICATION_FAILED: frozenset({"failure_code", "auth_method"}),
     AuditAction.AUTHORIZATION_DENIED: frozenset({"action", "reason_code"}),
-    AuditAction.MCP_EXECUTION: frozenset({"execution_code", "duration_ms"}),
+    AuditAction.MCP_EXECUTION: frozenset({"execution_code", "duration_ms", "server_id"}),
 }
 
 
@@ -238,6 +238,36 @@ async def record_independent_denial_event(
     This is intentionally best-effort: a failed audit write must not alter the
     authentication or authorization decision that prompted it.
     """
+    await record_independent_audit_event(
+        session,
+        organization_id=organization_id,
+        actor_type=actor_type,
+        actor_id=actor_id,
+        action=action,
+        target_type=target_type,
+        target_id=None,
+        outcome=(
+            AuditOutcome.FAILURE
+            if action is AuditAction.AUTHENTICATION_FAILED
+            else AuditOutcome.DENIED
+        ),
+        metadata=metadata,
+    )
+
+
+async def record_independent_audit_event(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    actor_type: AuditActorType,
+    actor_id: UUID | None,
+    action: AuditAction,
+    target_type: AuditTargetType,
+    target_id: UUID | None,
+    outcome: AuditOutcome,
+    metadata: Mapping[str, AuditMetadataValue] | None = None,
+) -> None:
+    """Best-effort bounded audit write outside the caller transaction."""
     if session.bind is None:
         logger.warning(
             "Independent audit event was not persisted action=%s reason=unbound_session",
@@ -255,12 +285,8 @@ async def record_independent_denial_event(
                         actor_id=actor_id,
                         action=action,
                         target_type=target_type,
-                        target_id=None,
-                        outcome=(
-                            AuditOutcome.FAILURE
-                            if action is AuditAction.AUTHENTICATION_FAILED
-                            else AuditOutcome.DENIED
-                        ),
+                        target_id=target_id,
+                        outcome=outcome,
                         metadata=metadata,
                     )
     except TimeoutError:
