@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -15,7 +16,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import FormData
 
-from coyote_mcp import catalog
+from coyote_mcp import catalog, connected_apps
 from coyote_mcp.auth import (
     AuthenticatedPrincipal,
     OrganizationBootstrapError,
@@ -30,8 +31,10 @@ from coyote_mcp.auth import (
     is_instance_administrator,
     select_active_organization,
 )
+from coyote_mcp.credentials import AUTH_POLICIES
 from coyote_mcp.db import get_session
 from coyote_mcp.discovery import SyncFailedError, SyncSupersededError
+from coyote_mcp.downstream_oauth import PROVIDERS
 from coyote_mcp.models import Collection, CollectionToolPublication, MCPServer, Organization, Tool
 from coyote_mcp.schemas import (
     CollectionCreate,
@@ -287,7 +290,7 @@ async def create_organization(request: Request, session: Session) -> Response:
             session,
             current,
             creation_error="Enter a valid organization slug and display name.",
-            response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            response_status=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     try:
         organization_request = OrganizationCreate(slug=slug, display_name=display_name)
@@ -303,7 +306,7 @@ async def create_organization(request: Request, session: Session) -> Response:
             session,
             current,
             creation_error="Enter a valid organization slug and display name.",
-            response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            response_status=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     except OrganizationBootstrapError as error:
         if error.category == "duplicate_slug":
@@ -556,7 +559,7 @@ async def server_register(request: Request, session: Session) -> Response:
             server=None,
             values=values,
             error="Enter a lowercase server name, a display name, and an HTTPS endpoint URL.",
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     except UnsafeEndpointError as error:
         return await _server_form_response(
@@ -566,7 +569,7 @@ async def server_register(request: Request, session: Session) -> Response:
             server=None,
             values=values,
             error=str(error),
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     except catalog.DuplicateResourceError as error:
         return await _server_form_response(
@@ -653,7 +656,7 @@ async def server_update(server_id: UUID, request: Request, session: Session) -> 
             server=server,
             values={"display_name": display_name},
             error=message,
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     return _see_other("/console/servers/" + str(server_id))
 
@@ -666,7 +669,7 @@ async def server_set_enabled(server_id: UUID, request: Request, session: Session
     current, form = result
     enabled = _form_text(form, "enabled")
     if enabled not in {"true", "false"}:
-        return HTMLResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY)
+        return HTMLResponse(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
     try:
         await catalog.set_server_enabled(session, current, server_id, enabled == "true")
     except catalog.MissingResourceError:
@@ -948,7 +951,7 @@ async def collection_create(request: Request, session: Session) -> Response:
                 "Enter a lowercase slug, a display name of up to 160 characters, "
                 "a description of up to 1000 characters, and a supported exposure mode."
             ),
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     except catalog.DuplicateResourceError as error:
         return await _collection_form_response(
@@ -1052,7 +1055,7 @@ async def collection_update(collection_id: UUID, request: Request, session: Sess
                 "Enter a display name of up to 160 characters, a description of up to "
                 "1000 characters, and a supported exposure mode."
             ),
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     return _see_other("/console/collections/" + str(collection_id))
 
@@ -1067,7 +1070,7 @@ async def collection_set_enabled(
     current, form = result
     enabled = _form_text(form, "enabled")
     if enabled not in {"true", "false"}:
-        return HTMLResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY)
+        return HTMLResponse(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
     try:
         await catalog.update_collection(
             session, current, collection_id, CollectionUpdate(enabled=enabled == "true")
@@ -1096,7 +1099,7 @@ async def collection_add_server(
             current,
             collection_id,
             "Choose a server to add.",
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     try:
         await catalog.add_collection_member(session, current, collection_id, server_id)
@@ -1107,7 +1110,7 @@ async def collection_add_server(
             current,
             collection_id,
             "Choose a server from this organization.",
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     except catalog.DuplicateResourceError as error:
         return await _collection_action_error(
@@ -1402,7 +1405,7 @@ async def publication_create(collection_id: UUID, request: Request, session: Ses
             current,
             collection_id,
             TOOL_CHOICE_MESSAGE,
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             draft=draft,
         )
     try:
@@ -1414,7 +1417,7 @@ async def publication_create(collection_id: UUID, request: Request, session: Ses
             current,
             collection_id,
             PUBLISHED_NAME_MESSAGE,
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             draft=draft,
         )
     try:
@@ -1426,7 +1429,7 @@ async def publication_create(collection_id: UUID, request: Request, session: Ses
             current,
             collection_id,
             TOOL_CHOICE_MESSAGE,
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             draft=draft,
         )
     except catalog.DuplicateResourceError as error:
@@ -1505,7 +1508,7 @@ async def publication_update(
             publication_id,
             values=values,
             message=PUBLICATION_FORM_MESSAGE,
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     except catalog.DuplicateResourceError as error:
         return await _publication_edit_error(
@@ -1547,6 +1550,258 @@ async def publication_remove(
     except catalog.AuthorizationError:
         return _render_forbidden(request, current)
     return _see_other("/console/collections/" + str(collection_id) + "/publications")
+
+
+async def _profile_response(
+    request: Request,
+    session: AsyncSession,
+    current: AuthenticatedPrincipal,
+    *,
+    notice: str | None = None,
+    action_error: str | None = None,
+    status_code: int = status.HTTP_200_OK,
+) -> HTMLResponse:
+    try:
+        apps = await connected_apps.list_connected_apps(session, current)
+    except catalog.AuthorizationError:
+        return _render_forbidden(request, current)
+    return _page_response(
+        request,
+        "profile",
+        _context(
+            request,
+            current,
+            page_title="My Profile",
+            active_navigation="profile",
+            organization_name=await _organization_name(session, current.require_organization_id()),
+            apps=apps,
+            notice=notice,
+            action_error=action_error,
+            csrf_token=_csrf_token(current),
+        ),
+        status_code=status_code,
+    )
+
+
+@router.get("/profile", response_class=HTMLResponse)
+async def my_profile(request: Request, session: Session) -> Response:
+    current = await _organization_principal(request, session)
+    if isinstance(current, Response):
+        return current
+    return await _profile_response(request, session, current)
+
+
+@router.get("/connected-apps/callback", response_class=HTMLResponse)
+async def connected_app_callback(
+    request: Request,
+    session: Session,
+    state: Annotated[str | None, Query(max_length=256)] = None,
+    code: Annotated[str | None, Query(max_length=4096)] = None,
+    error: Annotated[str | None, Query(max_length=256)] = None,
+) -> Response:
+    current = await _organization_principal(request, session)
+    if isinstance(current, Response):
+        return current
+    try:
+        server_name = await connected_apps.complete_connection(
+            session, Settings(), current, state=state, code=code, error=error
+        )
+    except connected_apps.ConnectedAppError as failure:
+        return await _profile_response(
+            request,
+            session,
+            current,
+            action_error=str(failure),
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        )
+    except catalog.AuthorizationError:
+        return _render_forbidden(request, current)
+    return await _profile_response(request, session, current, notice=f"Connected {server_name}.")
+
+
+@router.post("/connected-apps/{server_id}/connect")
+async def connected_app_connect(server_id: UUID, request: Request, session: Session) -> Response:
+    result = await _write_request(request, session)
+    if isinstance(result, Response):
+        return result
+    current, _ = result
+    try:
+        authorization_url = await connected_apps.start_connection(
+            session, Settings(), current, server_id
+        )
+    except catalog.MissingResourceError:
+        return _render_not_found(request, current)
+    except catalog.AuthorizationError:
+        return _render_forbidden(request, current)
+    except connected_apps.ConnectedAppError as failure:
+        return await _profile_response(
+            request,
+            session,
+            current,
+            action_error=str(failure),
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        )
+    # The URL is built from validated provider endpoints and a single-use transaction.
+    return RedirectResponse(authorization_url, status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/connected-apps/{server_id}/disconnect")
+async def connected_app_disconnect(server_id: UUID, request: Request, session: Session) -> Response:
+    result = await _write_request(request, session)
+    if isinstance(result, Response):
+        return result
+    current, _ = result
+    try:
+        await connected_apps.disconnect(session, Settings(), current, server_id)
+    except catalog.MissingResourceError:
+        return _render_not_found(request, current)
+    except catalog.AuthorizationError:
+        return _render_forbidden(request, current)
+    return _see_other("/console/profile")
+
+
+async def _authentication_response(
+    request: Request,
+    session: AsyncSession,
+    current: AuthenticatedPrincipal,
+    server_id: UUID,
+    *,
+    action_error: str | None = None,
+    status_code: int = status.HTTP_200_OK,
+) -> Response:
+    try:
+        view = await connected_apps.get_server_authentication(session, current, server_id)
+    except catalog.MissingResourceError:
+        return _render_not_found(request, current)
+    except catalog.AuthorizationError:
+        return _render_forbidden(request, current)
+    return _page_response(
+        request,
+        "server_authentication",
+        _context(
+            request,
+            current,
+            page_title=f"Authentication: {view.server_name}",
+            active_navigation="servers",
+            organization_name=await _organization_name(session, current.require_organization_id()),
+            view=view,
+            auth_policies=sorted(AUTH_POLICIES),
+            providers=sorted(PROVIDERS),
+            action_error=action_error,
+            csrf_token=_csrf_token(current),
+        ),
+        status_code=status_code,
+    )
+
+
+async def _authentication_mutation(
+    request: Request,
+    session: AsyncSession,
+    server_id: UUID,
+    mutation: Callable[[AuthenticatedPrincipal, FormData], Awaitable[None]],
+) -> Response:
+    result = await _write_request(request, session)
+    if isinstance(result, Response):
+        return result
+    current, form = result
+    try:
+        await mutation(current, form)
+    except catalog.MissingResourceError:
+        return _render_not_found(request, current)
+    except catalog.AuthorizationError:
+        return _render_forbidden(request, current)
+    except connected_apps.ConnectedAppError as failure:
+        return await _authentication_response(
+            request,
+            session,
+            current,
+            server_id,
+            action_error=str(failure),
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        )
+    return _see_other(f"/console/servers/{server_id}/authentication")
+
+
+@router.get("/servers/{server_id}/authentication", response_class=HTMLResponse)
+async def server_authentication_page(
+    server_id: UUID, request: Request, session: Session
+) -> Response:
+    gate = await _page_principal(request, session, "server:update")
+    if isinstance(gate, Response):
+        return gate
+    return await _authentication_response(request, session, gate, server_id)
+
+
+@router.post("/servers/{server_id}/authentication/policy")
+async def server_authentication_policy(
+    server_id: UUID, request: Request, session: Session
+) -> Response:
+    async def save(current: AuthenticatedPrincipal, form: FormData) -> None:
+        await connected_apps.set_auth_policy(
+            session, current, server_id, _form_text(form, "auth_policy")
+        )
+
+    return await _authentication_mutation(request, session, server_id, save)
+
+
+@router.post("/servers/{server_id}/authentication/integration")
+async def server_authentication_integration(
+    server_id: UUID, request: Request, session: Session
+) -> Response:
+    async def save(current: AuthenticatedPrincipal, form: FormData) -> None:
+        data = connected_apps.IntegrationInput(
+            provider=_form_text(form, "provider"),
+            client_id=_form_text(form, "client_id"),
+            client_secret=_form_text(form, "client_secret") or None,
+            scopes=_form_text(form, "scopes"),
+            authorization_endpoint=_form_text(form, "authorization_endpoint"),
+            token_endpoint=_form_text(form, "token_endpoint"),
+            revocation_endpoint=_form_text(form, "revocation_endpoint"),
+            account_endpoint=_form_text(form, "account_endpoint"),
+            enabled=form.get("enabled") == "on",
+        )
+        await connected_apps.save_integration(session, Settings(), current, server_id, data)
+
+    return await _authentication_mutation(request, session, server_id, save)
+
+
+@router.post("/servers/{server_id}/authentication/integration/enabled")
+async def server_authentication_integration_enabled(
+    server_id: UUID, request: Request, session: Session
+) -> Response:
+    async def toggle(current: AuthenticatedPrincipal, form: FormData) -> None:
+        enabled = _form_text(form, "enabled")
+        if enabled not in {"true", "false"}:
+            raise connected_apps.ConnectedAppError(
+                "invalid_request", "Choose whether the integration is enabled."
+            )
+        await connected_apps.set_integration_enabled(
+            session, Settings(), current, server_id, enabled == "true"
+        )
+
+    return await _authentication_mutation(request, session, server_id, toggle)
+
+
+@router.post("/servers/{server_id}/authentication/shared-credential")
+async def server_authentication_shared_credential(
+    server_id: UUID, request: Request, session: Session
+) -> Response:
+    async def store(current: AuthenticatedPrincipal, form: FormData) -> None:
+        await connected_apps.set_shared_credential(
+            session, Settings(), current, server_id, _form_text(form, "credential_value")
+        )
+
+    return await _authentication_mutation(request, session, server_id, store)
+
+
+@router.post("/servers/{server_id}/authentication/shared-credential/clear")
+async def server_authentication_shared_credential_clear(
+    server_id: UUID, request: Request, session: Session
+) -> Response:
+    async def clear(current: AuthenticatedPrincipal, form: FormData) -> None:
+        await connected_apps.clear_shared_credential(session, current, server_id)
+
+    return await _authentication_mutation(request, session, server_id, clear)
 
 
 @router.get("/{page_name}", response_class=HTMLResponse)

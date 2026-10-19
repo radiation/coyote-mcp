@@ -1,14 +1,21 @@
+import base64
+import html
 import re
-from collections.abc import AsyncIterator
+import secrets
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from urllib.parse import parse_qs, urlsplit
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from coyote_mcp import connected_apps
+from coyote_mcp import console as console_module
 from coyote_mcp.app import app
 from coyote_mcp.auth import (
     authenticate_browser_session,
@@ -734,7 +741,9 @@ SERVER_LINK = r"/console/servers/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4
 
 
 class _FailingDiscoveryClient:
-    async def list_tools(self, endpoint: str) -> list[DiscoveredTool]:
+    async def list_tools(
+        self, endpoint: str, headers: Mapping[str, str] | None = None
+    ) -> list[DiscoveredTool]:
         raise TimeoutError(endpoint)
 
 
@@ -2457,3 +2466,275 @@ def test_see_other_falls_back_to_console_root_for_untrusted_locations(location: 
 
     assert response.status_code == 303
     assert response.headers["location"] == "/console"
+
+
+CLIENT_SECRET = "gh-client-secret-value-do-not-leak"
+CLIENT_ID = "gh-client-id-123"
+
+
+@pytest.fixture
+def downstream_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
+    """Give the console a credential key and redirect base for the connected-apps routes."""
+    settings = Settings(
+        credential_encryption_keys={
+            "v1": SecretStr(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii"))
+        },
+        credential_active_key_version="v1",
+        downstream_oauth_redirect_base_url="https://coyote.example.test",
+    )
+    monkeypatch.setattr(console_module, "Settings", lambda: settings)
+    return settings
+
+
+async def _csrf_for_cookie(session_factory: async_sessionmaker[AsyncSession], cookie: str) -> str:
+    async with session_factory() as session:
+        current = await authenticate_browser_session(session, cookie)
+    assert current is not None and current.browser_session is not None
+    return csrf_token_for(current.browser_session, Settings())
+
+
+async def _set_auth_policy(
+    session_factory: async_sessionmaker[AsyncSession], server_id: UUID, policy: str
+) -> None:
+    async with session_factory() as session:
+        server = await session.get(MCPServer, server_id)
+        assert server is not None
+        server.auth_policy = policy
+        await session.commit()
+
+
+async def _configure_github_integration(
+    client: httpx.AsyncClient, server_id: UUID, csrf: str
+) -> None:
+    policy = await client.post(
+        f"/console/servers/{server_id}/authentication/policy",
+        data={"csrf_token": csrf, "auth_policy": "per_user_oauth"},
+    )
+    assert policy.status_code == 303
+    integration = await client.post(
+        f"/console/servers/{server_id}/authentication/integration",
+        data={
+            "csrf_token": csrf,
+            "provider": "github",
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "scopes": "read:user",
+            "enabled": "on",
+        },
+    )
+    assert integration.status_code == 303
+
+
+async def test_profile_shows_connected_apps_to_ordinary_members_without_secrets(
+    session_factory: async_sessionmaker[AsyncSession],
+    downstream_settings: Settings,
+) -> None:
+    owner_cookie, organization, _ = await _browser_session(session_factory, role="owner")
+    consumer_cookie, _, _ = await _browser_session(
+        session_factory, role="consumer", organization=organization
+    )
+    server_id = await _create_server(session_factory, organization.id, "github-hosted")
+    async with _console_client(session_factory, owner_cookie) as owner:
+        await _configure_github_integration(
+            owner,
+            server_id,
+            _csrf_token(await owner.get(f"/console/servers/{server_id}/authentication")),
+        )
+
+    async with _console_client(session_factory, consumer_cookie) as consumer:
+        profile = await consumer.get("/console/profile")
+
+    assert profile.status_code == 200
+    assert "Connected Apps" in profile.text
+    assert "github-hosted" in profile.text
+    assert f"/console/connected-apps/{server_id}/connect" in profile.text
+    assert CLIENT_SECRET not in profile.text
+    assert CLIENT_ID not in profile.text
+
+
+async def test_authentication_admin_pages_and_mutations_are_denied_to_members(
+    session_factory: async_sessionmaker[AsyncSession],
+    downstream_settings: Settings,
+) -> None:
+    _, organization, _ = await _browser_session(session_factory, role="owner")
+    consumer_cookie, _, _ = await _browser_session(
+        session_factory, role="consumer", organization=organization
+    )
+    server_id = await _create_server(session_factory, organization.id, "members-denied")
+    csrf = await _csrf_for_cookie(session_factory, consumer_cookie)
+
+    async with _console_client(session_factory, consumer_cookie) as consumer:
+        page = await consumer.get(f"/console/servers/{server_id}/authentication")
+        policy = await consumer.post(
+            f"/console/servers/{server_id}/authentication/policy",
+            data={"csrf_token": csrf, "auth_policy": "shared_bearer"},
+        )
+
+    assert page.status_code == 403
+    assert policy.status_code == 403
+    async with session_factory() as session:
+        server = await session.get(MCPServer, server_id)
+        assert server is not None
+        assert server.auth_policy == "none"
+
+
+async def test_authentication_mutations_reject_missing_csrf(
+    session_factory: async_sessionmaker[AsyncSession],
+    downstream_settings: Settings,
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="owner")
+    server_id = await _create_server(session_factory, organization.id, "csrf-server")
+
+    async with _console_client(session_factory, cookie) as client:
+        policy = await client.post(
+            f"/console/servers/{server_id}/authentication/policy",
+            data={"auth_policy": "shared_bearer"},
+        )
+        bad_token = await client.post(
+            f"/console/servers/{server_id}/authentication/policy",
+            data={"csrf_token": "not-the-token", "auth_policy": "shared_bearer"},
+        )
+        disconnect = await client.post(f"/console/connected-apps/{server_id}/disconnect")
+
+    assert policy.status_code == 403
+    assert bad_token.status_code == 403
+    assert disconnect.status_code == 403
+    async with session_factory() as session:
+        server = await session.get(MCPServer, server_id)
+        assert server is not None
+        assert server.auth_policy == "none"
+
+
+async def test_admin_configuration_never_renders_client_secret(
+    session_factory: async_sessionmaker[AsyncSession],
+    downstream_settings: Settings,
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="owner")
+    server_id = await _create_server(session_factory, organization.id, "admin-config")
+    csrf = await _csrf_for_cookie(session_factory, cookie)
+
+    async with _console_client(session_factory, cookie) as client:
+        await _configure_github_integration(client, server_id, csrf)
+        page = await client.get(f"/console/servers/{server_id}/authentication")
+
+    assert page.status_code == 200
+    assert CLIENT_SECRET not in page.text
+    assert "github" in page.text.lower()
+
+
+async def test_connect_redirects_to_github_with_pkce_and_state_without_secret(
+    session_factory: async_sessionmaker[AsyncSession],
+    downstream_settings: Settings,
+) -> None:
+    owner_cookie, organization, _ = await _browser_session(session_factory, role="owner")
+    consumer_cookie, _, _ = await _browser_session(
+        session_factory, role="consumer", organization=organization
+    )
+    server_id = await _create_server(session_factory, organization.id, "connect-github")
+    async with _console_client(session_factory, owner_cookie) as owner:
+        await _configure_github_integration(
+            owner, server_id, await _csrf_for_cookie(session_factory, owner_cookie)
+        )
+    await _set_auth_policy(session_factory, server_id, "per_user_oauth")
+    csrf = await _csrf_for_cookie(session_factory, consumer_cookie)
+
+    async with _console_client(session_factory, consumer_cookie) as consumer:
+        response = await consumer.post(
+            f"/console/connected-apps/{server_id}/connect", data={"csrf_token": csrf}
+        )
+
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert CLIENT_SECRET not in location
+    parts = urlsplit(location)
+    assert (
+        f"{parts.scheme}://{parts.netloc}{parts.path}" == "https://github.com/login/oauth/authorize"
+    )
+    query = parse_qs(parts.query)
+    assert query["client_id"] == [CLIENT_ID]
+    assert query["code_challenge_method"] == ["S256"]
+    assert query["redirect_uri"] == ["https://coyote.example.test/console/connected-apps/callback"]
+    assert len(query["state"][0]) >= 32
+    assert query["code_challenge"][0]
+
+
+async def test_connect_requires_csrf(
+    session_factory: async_sessionmaker[AsyncSession],
+    downstream_settings: Settings,
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="consumer")
+    server_id = await _create_server(session_factory, organization.id, "connect-csrf")
+
+    async with _console_client(session_factory, cookie) as client:
+        response = await client.post(f"/console/connected-apps/{server_id}/connect")
+
+    assert response.status_code == 403
+
+
+async def test_callback_rejects_unsolicited_state(
+    session_factory: async_sessionmaker[AsyncSession],
+    downstream_settings: Settings,
+) -> None:
+    cookie, _, _ = await _browser_session(session_factory, role="consumer")
+
+    async with _console_client(session_factory, cookie) as client:
+        response = await client.get(
+            "/console/connected-apps/callback", params={"state": "never-issued", "code": "abc"}
+        )
+
+    assert response.status_code == 422
+    assert html.escape(connected_apps.INVALID_CALLBACK_MESSAGE) in response.text
+
+
+async def test_callback_transaction_is_single_use(
+    session_factory: async_sessionmaker[AsyncSession],
+    downstream_settings: Settings,
+) -> None:
+    owner_cookie, organization, _ = await _browser_session(session_factory, role="owner")
+    consumer_cookie, _, _ = await _browser_session(
+        session_factory, role="consumer", organization=organization
+    )
+    server_id = await _create_server(session_factory, organization.id, "single-use")
+    async with _console_client(session_factory, owner_cookie) as owner:
+        await _configure_github_integration(
+            owner, server_id, await _csrf_for_cookie(session_factory, owner_cookie)
+        )
+    await _set_auth_policy(session_factory, server_id, "per_user_oauth")
+
+    async with _console_client(session_factory, consumer_cookie) as consumer:
+        connect = await consumer.post(
+            f"/console/connected-apps/{server_id}/connect",
+            data={"csrf_token": await _csrf_for_cookie(session_factory, consumer_cookie)},
+        )
+        state = parse_qs(urlsplit(connect.headers["location"]).query)["state"][0]
+        first = await consumer.get(
+            "/console/connected-apps/callback",
+            params={"state": state, "error": "access_denied"},
+        )
+        replay = await consumer.get(
+            "/console/connected-apps/callback",
+            params={"state": state, "code": "replayed-code"},
+        )
+
+    assert first.status_code == 422
+    assert replay.status_code == 422
+    assert html.escape(connected_apps.INVALID_CALLBACK_MESSAGE) in replay.text
+
+
+async def test_disconnect_requires_csrf_then_redirects_to_profile(
+    session_factory: async_sessionmaker[AsyncSession],
+    downstream_settings: Settings,
+) -> None:
+    cookie, organization, _ = await _browser_session(session_factory, role="consumer")
+    server_id = await _create_server(session_factory, organization.id, "disconnect-me")
+    csrf = await _csrf_for_cookie(session_factory, cookie)
+
+    async with _console_client(session_factory, cookie) as client:
+        rejected = await client.post(f"/console/connected-apps/{server_id}/disconnect")
+        accepted = await client.post(
+            f"/console/connected-apps/{server_id}/disconnect", data={"csrf_token": csrf}
+        )
+
+    assert rejected.status_code == 403
+    assert accepted.status_code == 303
+    assert accepted.headers["location"] == "/console/profile"

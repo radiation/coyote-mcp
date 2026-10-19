@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -5,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coyote_mcp.auth import AuthenticatedPrincipal, authorize
+from coyote_mcp.credentials import DownstreamCredentialBroker
 from coyote_mcp.discovery import get_discovery_service
 from coyote_mcp.models import (
     Collection,
@@ -239,7 +241,31 @@ async def synchronize_server(
     session: AsyncSession, current: AuthenticatedPrincipal, server_id: UUID
 ) -> MCPServer:
     server = await _authorized_server(session, current, "server:sync", server_id)
-    return await get_discovery_service(Settings()).sync(session, server)
+    return await discover_server(session, current, server)
+
+
+async def discover_server(
+    session: AsyncSession, current: AuthenticatedPrincipal, server: MCPServer
+) -> MCPServer:
+    """Refresh the catalog using the downstream credential for the syncing caller.
+
+    Discovery uses the caller's own connection for per-user servers and never a shared
+    or administrator identity to infer what individual users can access. If no valid
+    connection exists, the sync fails closed and the last-known catalog is kept.
+    """
+    settings = Settings()
+    broker = DownstreamCredentialBroker(settings)
+
+    async def headers_provider() -> Mapping[str, str]:
+        authorization = await broker.authorize(session, current, server)
+        return authorization.headers
+
+    return await get_discovery_service(settings).sync(
+        session,
+        server,
+        headers_provider=headers_provider,
+        deactivate_missing=server.auth_policy != "per_user_oauth",
+    )
 
 
 async def read_server(
@@ -402,7 +428,7 @@ async def list_collection_memberships(
         .order_by(MCPServer.display_name, MCPServer.id)
         .limit(limit)
     )
-    return [(membership, server) for membership, server in rows.tuples().all()]
+    return [(membership, server) for membership, server in rows.all()]
 
 
 async def list_addable_servers(
@@ -447,7 +473,7 @@ async def list_collection_tool_rows(
         .limit(limit)
         .offset(offset)
     )
-    return [(tool, server) for tool, server in rows.tuples().all()]
+    return [(tool, server) for tool, server in rows.all()]
 
 
 async def remove_membership(
@@ -538,7 +564,7 @@ async def list_publication_rows(
     )
     return [
         (publication, tool, server, membership_enabled)
-        for publication, tool, server, membership_enabled in rows.tuples().all()
+        for publication, tool, server, membership_enabled in rows.all()
     ]
 
 
@@ -570,7 +596,7 @@ async def list_unpublished_collection_tools(
         .limit(limit)
         .offset(offset)
     )
-    return [(tool, server) for tool, server in rows.tuples().all()]
+    return [(tool, server) for tool, server in rows.all()]
 
 
 async def list_organization_tool_rows(
@@ -584,7 +610,7 @@ async def list_organization_tool_rows(
         .limit(limit)
         .offset(offset)
     )
-    return [(tool, server) for tool, server in rows.tuples().all()]
+    return [(tool, server) for tool, server in rows.all()]
 
 
 async def count_tool_publications(
@@ -601,7 +627,7 @@ async def count_tool_publications(
         )
         .group_by(CollectionToolPublication.tool_id)
     )
-    return {tool_id: count for tool_id, count in rows.tuples().all()}
+    return {tool_id: count for tool_id, count in rows.all()}
 
 
 def publication_exposure_issues(
@@ -759,7 +785,7 @@ async def read_publication(
             CollectionToolPublication.collection_id == collection_id,
         )
     )
-    result = row.tuples().one_or_none()
+    result = row.one_or_none()
     if result is None:
         raise MissingResourceError("Tool publication not found.")
     return result

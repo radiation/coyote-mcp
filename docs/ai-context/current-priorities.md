@@ -103,6 +103,33 @@
   which. Published-tool visibility requires `collection:update`. Publishing
   into a disabled collection is allowed, and the page warns that nothing is
   exposed until the collection is enabled.
+- **Phase 4C downstream authentication and Connected Apps:** Servers choose
+  `none`, `shared_bearer`, or `per_user_oauth`. Migration `0019` adds sealed
+  shared credentials, OAuth integrations, per-principal connections, and
+  single-use OAuth transactions. A reusable credential broker serves discovery
+  and gateway execution. GitHub is the first OAuth provider preset; My Profile
+  and Connected Apps are available to ordinary members, and administrators
+  configure policy, integrations, and shared credentials in the console.
+  Callbacks use PKCE S256 and a random state. Execution fails closed with a
+  structured `connection_required` error when a user has no valid connection,
+  and it never forwards caller PATs or sessions. Limitations: GitHub OAuth Apps
+  are assumed rather than GitHub Apps; GitHub hosted MCP OAuth scopes and token
+  expiry are unverified; disconnect removes local credentials only, because
+  GitHub OAuth Apps expose no revocation endpoint here; 401 detection is
+  heuristic; RFC 8414 discovery and RFC 8707 resource indicators are not
+  implemented; key rotation is by version map with no re-seal command; and
+  PostgreSQL concurrency, migration, and browser acceptance tests are deferred.
+  Icons are local monograms only. Final design alignment standardizes new
+  deployment configuration on `COYOTE_` downstream setting names (with legacy
+  aliases accepted), requires both `server:update` and the relevant
+  `credential:create` or `credential:revoke` permission for authentication
+  configuration writes, and permits `connection:manage_own` through direct or
+  verified-group collection grants. Browser-session instance administrators may
+  manage only their own connections in enabled organizations; PATs do not gain
+  that exception.
+  Local OAuth development permits an HTTP callback only for loopback origins
+  when both development mode and `ALLOW_INSECURE_ENDPOINTS=true` are set; all
+  non-loopback callbacks remain HTTPS-only.
 - **Console CSRF lifecycle:** Console and API mutations use a token derived with
   HMAC-SHA256 from the browser session's stored secret hash, a `csrf_epoch`
   counter (migration `0018`), and the session secret key. Rendering reuses the
@@ -114,8 +141,9 @@
 
 ## Next
 
-- **Phase 3B:** Downstream credential integration, audit events, cancellation,
-  and operational metrics for MCP execution.
+- **Phase 3B:** Audit events, cancellation, and operational metrics for MCP
+  execution, plus downstream authentication follow-ups (provider discovery,
+  additional providers, and credential re-seal tooling).
 - **Phase 3C:** Per-principal fine-grained tool policy, richer discovery, and
   semantic search without weakening the persisted-catalog boundary.
 - **Later:** Semantic/search-based progressive discovery, console audit views,
@@ -124,7 +152,8 @@
 
 ## Open technical decisions
 
-- Downstream credential storage, authentication, and delegation model.
+- Downstream authentication for providers beyond GitHub, GitHub App support,
+  and revocation for providers that offer it.
 - Execution cancellation, audit retention, and policy-enforcement contract.
 - Search/indexing design and how it exposes only currently authorized tools.
 - Production operations: audit/event retention, metrics, and hardening scope.

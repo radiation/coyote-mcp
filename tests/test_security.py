@@ -24,7 +24,7 @@ from coyote_mcp.settings import DEVELOPMENT_SESSION_SECRET, Settings
 )
 def test_unsafe_endpoint_is_rejected(endpoint: str) -> None:
     with pytest.raises(UnsafeEndpointError):
-        validate_endpoint(endpoint, Settings())
+        validate_endpoint(endpoint, Settings(allow_insecure_endpoints=False))
 
 
 def test_explicit_development_configuration_allows_private_http_endpoint() -> None:

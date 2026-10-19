@@ -13,6 +13,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    LargeBinary,
     String,
     UniqueConstraint,
     Uuid,
@@ -47,6 +48,10 @@ class MCPServer(Base):
     __table_args__ = (
         UniqueConstraint("organization_id", "name", name="uq_servers_organization_id_name"),
         UniqueConstraint("id", "organization_id", name="uq_servers_id_organization_id"),
+        CheckConstraint(
+            "auth_policy IN ('none', 'shared_bearer', 'per_user_oauth')",
+            name="ck_servers_auth_policy",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
@@ -57,6 +62,9 @@ class MCPServer(Base):
     display_name: Mapped[str] = mapped_column(String(160))
     endpoint: Mapped[str] = mapped_column(String(2048))
     transport: Mapped[str] = mapped_column(String(32), default="streamable_http")
+    auth_policy: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="none", server_default=text("'none'")
+    )
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(32), default="pending")
     sync_generation: Mapped[int] = mapped_column(default=0)
@@ -416,4 +424,142 @@ class GroupRoleMapping(Base):
     external_group_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False, index=True)
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     collection_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DownstreamSharedCredential(Base):
+    __tablename__ = "downstream_shared_credentials"
+    __table_args__ = (
+        UniqueConstraint("server_id", name="uq_downstream_shared_credentials_server_id"),
+        ForeignKeyConstraint(
+            ["server_id", "organization_id"],
+            ["servers.id", "servers.organization_id"],
+            ondelete="CASCADE",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    server_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    key_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    sealed_value: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class DownstreamOAuthIntegration(Base):
+    __tablename__ = "downstream_oauth_integrations"
+    __table_args__ = (
+        UniqueConstraint("server_id", name="uq_downstream_oauth_integrations_server_id"),
+        ForeignKeyConstraint(
+            ["server_id", "organization_id"],
+            ["servers.id", "servers.organization_id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "provider IN ('github', 'generic')",
+            name="ck_downstream_oauth_integrations_provider",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    server_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    authorization_endpoint: Mapped[str] = mapped_column(String(2048), nullable=False)
+    token_endpoint: Mapped[str] = mapped_column(String(2048), nullable=False)
+    revocation_endpoint: Mapped[str | None] = mapped_column(String(2048))
+    account_endpoint: Mapped[str | None] = mapped_column(String(2048))
+    client_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    client_secret_key_version: Mapped[str | None] = mapped_column(String(64))
+    client_secret_sealed: Mapped[bytes | None] = mapped_column(LargeBinary)
+    scopes: Mapped[list[str]] = mapped_column(JSONBType, default=list)
+    icon_key: Mapped[str | None] = mapped_column(String(64))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    configuration_error: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class DownstreamConnection(Base):
+    __tablename__ = "downstream_connections"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "server_id",
+            "principal_id",
+            name="uq_downstream_connections_org_server_principal",
+        ),
+        ForeignKeyConstraint(
+            ["server_id", "organization_id"],
+            ["servers.id", "servers.organization_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(["principal_id"], ["principals.id"], ondelete="CASCADE"),
+        CheckConstraint(
+            "status IN ('connected', 'reauthorization_required')",
+            name="ck_downstream_connections_status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    server_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False, index=True)
+    principal_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False, index=True)
+    integration_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    credential_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="connected")
+    key_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    sealed_tokens: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    scopes: Mapped[list[str]] = mapped_column(JSONBType, default=list)
+    account_identifier: Mapped[str | None] = mapped_column(String(255))
+    access_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class DownstreamOAuthTransaction(Base):
+    __tablename__ = "downstream_oauth_transactions"
+    __table_args__ = (
+        UniqueConstraint("state_hash", name="uq_downstream_oauth_transactions_state_hash"),
+        ForeignKeyConstraint(
+            ["server_id", "organization_id"],
+            ["servers.id", "servers.organization_id"],
+            ondelete="CASCADE",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    state_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    browser_session_id: Mapped[UUID] = mapped_column(
+        ForeignKey("browser_sessions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    principal_id: Mapped[UUID] = mapped_column(
+        ForeignKey("principals.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    server_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    integration_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    key_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    sealed_verifier: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

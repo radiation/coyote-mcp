@@ -15,6 +15,7 @@
         <a class="brand" href="{{ url_for('overview') }}">coyote-mcp</a>
         <nav>
           {{ components.navigation_item('Overview', 'overview', url_for('overview'), active_navigation|default('')) }}
+          {{ components.navigation_item('My Profile', 'profile', url_for('my_profile'), active_navigation|default('')) }}
           {{ components.navigation_item('MCP Servers', 'servers', url_for('server_list'), active_navigation|default('')) }}
           {{ components.navigation_item('Collections', 'collections', url_for('collection_list'), active_navigation|default('')) }}
           {{ components.navigation_item('Tool Catalog', 'tools', url_for('tool_catalog'), active_navigation|default('')) }}

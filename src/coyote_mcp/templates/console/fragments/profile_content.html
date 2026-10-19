@@ -1,0 +1,67 @@
+{% import "console/components.html" as components %}
+{{ components.page_header('My Profile', 'Your verified identity and the external accounts you have connected.') }}
+{% if notice %}<div class="form-notice" role="status">{{ notice }}</div>{% endif %}
+{% if action_error %}<div class="form-error" role="alert">{{ action_error }}</div>{% endif %}
+<section class="section-block" aria-labelledby="profile-identity-title">
+  <div class="section-heading"><h2 id="profile-identity-title">Identity</h2></div>
+  <dl class="detail-list">
+    <dt>Name</dt><dd>{{ current.principal.display_name }}</dd>
+    <dt>Identifier</dt><dd>{{ current.principal.identifier }}</dd>
+    <dt>Organization</dt><dd>{{ organization_name|default('Organization') }}</dd>
+  </dl>
+</section>
+<section class="section-block" aria-labelledby="connected-apps-title">
+  <div class="section-heading"><h2 id="connected-apps-title">Connected Apps</h2></div>
+  <p class="muted">Administrator-approved integrations you can connect to. Coyote never shows the tokens it stores for you.</p>
+  {% if apps %}
+  <div class="table-wrap"><table>
+    <thead><tr><th scope="col">Integration</th><th scope="col">State</th><th scope="col">Account</th><th scope="col">Scopes</th><th scope="col">Actions</th></tr></thead>
+    <tbody>
+    {% for app in apps %}
+      <tr>
+        <td>
+          <span class="app-icon" aria-hidden="true">{% if app.provider == 'github' %}GH{% else %}APP{% endif %}</span>
+          {{ app.server_name }}
+        </td>
+        <td>
+          {% if app.state == 'connected' %}<span class="badge badge-connected">Connected</span>
+          {% elif app.state == 'expired' %}<span class="badge badge-expired">Expired</span>
+          {% elif app.state == 'authorization_required' %}<span class="badge badge-authorization-required">Authorization required</span>
+          {% elif app.state == 'disabled' %}<span class="badge badge-disabled">Disabled</span>
+          {% else %}<span class="badge badge-available">Available</span>{% endif %}
+          {% if app.expires_at %}<div class="muted">Access until {{ app.expires_at.strftime('%Y-%m-%d %H:%M UTC') }}</div>{% endif %}
+        </td>
+        <td>{{ app.account_identifier or '—' }}</td>
+        <td>{% if app.scopes %}{{ app.scopes|join(', ') }}{% else %}—{% endif %}</td>
+        <td>
+          <div class="action-row">
+            {% if app.state in ['available', 'authorization_required'] %}
+            <form method="post" action="{{ url_for('connected_app_connect', server_id=app.server_id) }}" hx-boost="false" class="inline-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button type="submit">Connect {{ app.server_name }}</button>
+            </form>
+            {% elif app.state == 'expired' %}
+            <form method="post" action="{{ url_for('connected_app_connect', server_id=app.server_id) }}" hx-boost="false" class="inline-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button type="submit">Reconnect</button>
+            </form>
+            {% elif app.state == 'connected' %}
+            <form method="post" action="{{ url_for('connected_app_connect', server_id=app.server_id) }}" hx-boost="false" class="inline-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button type="submit" class="button-secondary">Reconnect</button>
+            </form>
+            {% endif %}
+            {% if app.has_connection %}
+            <form method="post" action="{{ url_for('connected_app_disconnect', server_id=app.server_id) }}" hx-boost="false" class="inline-form" onsubmit="return confirm('Disconnect {{ app.server_name }}? Coyote will stop using this connection.');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button type="submit" class="button-danger">Disconnect</button>
+            </form>
+            {% endif %}
+          </div>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}{{ components.empty_state('No Connected Apps', 'Your administrator has not approved any integrations that require a personal connection.') }}{% endif %}
+</section>

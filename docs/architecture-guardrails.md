@@ -17,10 +17,14 @@ that must preserve these invariants.
   membership and roles remain required for ordinary principals. An enabled
   instance administrator is the sole shared override for browser-session
   organization administration and does not create synthetic memberships or
-  owner roles. PAT-authenticated REST calls retain their explicit scopes and
-  role evaluation. Callers must enforce that decision in application services,
-  not exclusively in HTTP handlers. Collection-list authorization stays
-  membership-based for PAT-authenticated MCP discovery and execution.
+  owner roles. A browser-session instance administrator may use the narrowly
+  scoped `connection:manage_own` self-service action for only their own
+  downstream connections in an enabled organization; this exception does not
+  apply to PATs, service principals, or tool execution. PAT-authenticated REST
+  calls retain their explicit scopes and role evaluation. Callers must enforce
+  that decision in application services, not exclusively in HTTP handlers.
+  Collection-list authorization stays membership-based for PAT-authenticated MCP
+  discovery and execution.
 - **PAT scopes attenuate permissions.** PATs remain bound to one organization.
   PAT creation requires requested scopes to be a subset of the principal's
   direct role permissions; a request must satisfy both its token scope and
@@ -92,7 +96,11 @@ that must preserve these invariants.
 - **MCP execution uses registered destinations only.** Execution validates the
   stored input schema, DNS-pins the registered endpoint, disables redirects, and
   does not forward the caller PAT. Downstream responses remain structured but
-  are size-bounded; transport failures expose sanitized errors only. FastMCP
+  are size-bounded; transport failures expose sanitized errors only. Execution
+  attaches only the credential the broker selects for the caller's own
+  organization, server, and principal, and never retries a tool call after a
+  refresh or upstream rejection.
+ FastMCP
   4.1.0 does not expose a response-stream interception hook compatible with its
   Streamable HTTP client, so the result-size bound is enforced immediately after
   FastMCP deserializes the result rather than while its response body streams.
@@ -128,9 +136,17 @@ that must preserve these invariants.
 
 ## Planned functionality
 
-- **Credentialed downstream integrations:** The registry has no general
-  downstream credential storage or propagation mechanism yet. Any future
-  mechanism must preserve the secret and destination protections above.
+- **Credentialed downstream integrations are brokered.** Shared bearer and
+  per-user OAuth credentials are sealed with AES-256-GCM using a separately
+  configured key set, bound to organization, server, and principal, and never
+  returned, logged, or forwarded from caller PATs or browser sessions. Execution
+  and discovery obtain headers only through the credential broker; authorization
+  checks do not depend on credential availability, and no shared credential
+  substitutes for a missing per-user connection.
+- **OAuth transactions are single-use and bound.** Authorization-code flows use
+  PKCE S256 and a random state stored only as a hash, bound to browser session,
+  principal, organization, and server. Callbacks claim the transaction atomically
+  and fail closed when it is unknown, replayed, expired, or mismatched.
 - **Remaining console and semantic discovery:** Semantic discovery, console audit
   views, metrics, principal and token administration, and richer policy
   features remain future work and must not create a parallel policy path.

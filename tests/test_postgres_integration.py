@@ -1,6 +1,6 @@
 import asyncio
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -299,7 +299,9 @@ class OrderedDiscoveryClient:
         self.release_first = asyncio.Event()
         self.calls = 0
 
-    async def list_tools(self, endpoint: str) -> list[DiscoveredTool]:
+    async def list_tools(
+        self, endpoint: str, headers: Mapping[str, str] | None = None
+    ) -> list[DiscoveredTool]:
         self.calls += 1
         if self.calls == 1:
             self.first_started.set()

@@ -38,6 +38,32 @@ class Settings(BaseSettings):
     )
     max_execution_result_bytes: int = 1_048_576
     pat_max_lifetime_seconds: int = 60 * 60 * 24 * 90
+    credential_encryption_keys: dict[str, SecretStr] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices(
+            "COYOTE_CREDENTIAL_ENCRYPTION_KEYS", "CREDENTIAL_ENCRYPTION_KEYS"
+        ),
+    )
+    credential_active_key_version: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "COYOTE_CREDENTIAL_ACTIVE_KEY_VERSION", "CREDENTIAL_ACTIVE_KEY_VERSION"
+        ),
+    )
+    downstream_oauth_redirect_base_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "COYOTE_DOWNSTREAM_OAUTH_REDIRECT_BASE_URL",
+            "DOWNSTREAM_OAUTH_REDIRECT_BASE_URL",
+        ),
+    )
+    downstream_oauth_timeout_seconds: float = Field(
+        default=10.0,
+        validation_alias=AliasChoices(
+            "COYOTE_DOWNSTREAM_OAUTH_TIMEOUT_SECONDS",
+            "DOWNSTREAM_OAUTH_TIMEOUT_SECONDS",
+        ),
+    )
     environment: str = "development"
     session_secret_key: str = "development-only-change-me"
     session_max_age_seconds: int = 60 * 60 * 8

@@ -44,6 +44,7 @@ ALL_ACTIONS = frozenset(
         "tool:execute",
         "credential:create",
         "credential:revoke",
+        "connection:manage_own",
         "policy:manage",
     }
 )
@@ -64,12 +65,28 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
             "tool:describe",
             "credential:create",
             "credential:revoke",
+            "connection:manage_own",
         }
     ),
     "consumer": frozenset(
-        {"server:read", "collection:read", "tool:discover", "tool:describe", "tool:execute"}
+        {
+            "server:read",
+            "collection:read",
+            "tool:discover",
+            "tool:describe",
+            "tool:execute",
+            "connection:manage_own",
+        }
     ),
-    "viewer": frozenset({"server:read", "collection:read", "tool:discover", "tool:describe"}),
+    "viewer": frozenset(
+        {
+            "server:read",
+            "collection:read",
+            "tool:discover",
+            "tool:describe",
+            "connection:manage_own",
+        }
+    ),
 }
 CredentialContext = Literal["browser_session", "pat"]
 
@@ -122,6 +139,12 @@ def _token_parts(value: str, prefix: str) -> tuple[str, str] | None:
         return None
     parts = value.split("_", 3)
     return (parts[2], parts[3]) if len(parts) == 4 and parts[2] and parts[3] else None
+
+
+async def enabled_membership(
+    session: AsyncSession, principal_id: UUID, organization_id: UUID
+) -> OrganizationMembership | None:
+    return await _enabled_membership(session, principal_id, organization_id)
 
 
 async def _enabled_membership(
@@ -692,3 +715,54 @@ async def authorize(
         if isinstance(collection_id, UUID) and assigned_collection_id == collection_id:
             return Decision(True, f"collection_role:{role}")
     return Decision(False, "missing_permission")
+
+
+async def self_service_action_allowed(
+    session: AsyncSession,
+    principal: Principal,
+    organization_id: UUID,
+    action: str,
+    verified_group_ids: frozenset[str] = frozenset(),
+    credential_context: CredentialContext = "browser_session",
+) -> bool:
+    """Allow a member to act on their own resources in an organization.
+
+    Self-service actions (such as managing one's own downstream connections) are
+    not scoped to a collection or organization resource, so any role grant that
+    includes the action, at any scope, is sufficient. Callers must still verify
+    that the action concerns only the authenticated principal.
+    """
+    if action not in ALL_ACTIONS or not principal.enabled:
+        return False
+    if not await _enabled_organization(session, organization_id):
+        return False
+    if credential_context == "browser_session" and await is_instance_administrator(
+        session, principal
+    ):
+        return True
+    if await _enabled_membership(session, principal.id, organization_id) is None:
+        return False
+    roles = set(
+        (
+            await session.scalars(
+                select(RoleAssignment.role).where(
+                    RoleAssignment.principal_id == principal.id,
+                    RoleAssignment.organization_id == organization_id,
+                )
+            )
+        ).all()
+    )
+    if verified_group_ids:
+        roles.update(
+            (
+                await session.scalars(
+                    select(GroupRoleMapping.role)
+                    .join(ExternalGroup, GroupRoleMapping.external_group_id == ExternalGroup.id)
+                    .where(
+                        GroupRoleMapping.organization_id == organization_id,
+                        ExternalGroup.external_id.in_(verified_group_ids),
+                    )
+                )
+            ).all()
+        )
+    return any(action in ROLE_PERMISSIONS.get(role, frozenset()) for role in roles)

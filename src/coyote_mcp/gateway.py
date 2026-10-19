@@ -28,7 +28,14 @@ from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coyote_mcp.auth import AuthenticatedPrincipal, authorized_collection_ids
+from coyote_mcp.credentials import (
+    POLICY_PER_USER_OAUTH,
+    REAUTHORIZE_MESSAGE,
+    DownstreamAuthorization,
+    DownstreamCredentialBroker,
+)
 from coyote_mcp.discovery import FastMCPDiscoveryClient
+from coyote_mcp.downstream_errors import DownstreamAuthorizationError
 from coyote_mcp.models import (
     Collection,
     CollectionMembership,
@@ -135,6 +142,29 @@ def _run_schema_validation(
 
 class GatewayError(RuntimeError):
     pass
+
+
+_MAX_EXCEPTION_CHAIN_DEPTH = 16
+
+
+def _upstream_status_code(error: BaseException) -> int | None:
+    """Return the HTTP status from an upstream error chain without exposing its body."""
+    current: BaseException | None = error
+    for _ in range(_MAX_EXCEPTION_CHAIN_DEPTH):
+        if current is None:
+            return None
+        if isinstance(current, httpx.HTTPStatusError | httpx2.HTTPStatusError):
+            return current.response.status_code
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _rejection_error(authorization: DownstreamAuthorization, status_code: int) -> str:
+    if status_code == 401 and authorization.policy == POLICY_PER_USER_OAUTH:
+        return REAUTHORIZE_MESSAGE
+    if status_code == 401:
+        return "The downstream service rejected the configured service credential."
+    return "The downstream service denied access for this request."
 
 
 @dataclass(frozen=True)
@@ -329,20 +359,25 @@ class GatewayService:
         arguments: dict[str, Any],
         collection_slug: str | None,
     ) -> dict[str, Any]:
-        tool_name, endpoint, input_schema = await self._execution_snapshot(
+        tool_name, server, input_schema, refreshed_current = await self._execution_snapshot(
             session,
             current,
             tool_id,
             collection_slug,
         )
         await self._validate_arguments(input_schema, arguments)
+        authorization = await self._downstream_authorization(session, refreshed_current, server)
+        # Each execution gets its own transport and HTTP client so that credentials cannot
+        # be reused by another principal through pooled connections.
+        headers = dict(authorization.headers) or None
         try:
             client_factory = FastMCPDiscoveryClient._http_client_factory(
-                FastMCPDiscoveryClient(self._settings)._resolve_endpoint(endpoint),
+                FastMCPDiscoveryClient(self._settings)._resolve_endpoint(server.endpoint),
                 self._settings.execution_timeout_seconds,
             )
             transport = StreamableHttpTransport(
-                endpoint,
+                server.endpoint,
+                headers=headers,
                 httpx_client_factory=client_factory,
             )
             async with Client(
@@ -356,17 +391,16 @@ class GatewayService:
                     timeout=self._settings.execution_timeout_seconds,
                     raise_on_error=False,
                 )
-        except (TimeoutError, httpx.TimeoutException, httpx2.TimeoutException) as error:
-            raise GatewayError("Downstream tool execution timed out.") from error
-        except MCPError as error:
-            if error.code == REQUEST_TIMEOUT:
-                raise GatewayError("Downstream tool execution timed out.") from error
-            raise GatewayError("Downstream tool execution failed.") from error
-        except (FastMCPError, RuntimeError, httpx.HTTPError, httpx2.HTTPError) as error:
-            raise GatewayError("Downstream tool execution failed.") from error
-        except Exception:
-            logger.exception("Unexpected downstream MCP execution failure for tool %s", tool_id)
-            raise GatewayError("Downstream tool execution failed.") from None
+        except Exception as error:
+            # Non-idempotent tools are never retried here, so a rejected credential is
+            # reported to the caller instead of being replayed after a refresh.
+            status_code = _upstream_status_code(error)
+            if status_code in {401, 403}:
+                await DownstreamCredentialBroker(self._settings).record_rejection(
+                    session, authorization, status_code
+                )
+                raise GatewayError(_rejection_error(authorization, status_code)) from None
+            raise self._execution_error(error, tool_id) from error
         payload = jsonable_encoder(asdict(result))
         if len(json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode()) > (
             self._settings.max_execution_result_bytes
@@ -374,13 +408,38 @@ class GatewayService:
             raise GatewayError("Downstream tool result exceeded the configured size limit.")
         return cast(dict[str, Any], payload)
 
+    def _execution_error(self, error: Exception, tool_id: UUID) -> GatewayError:
+        if isinstance(error, TimeoutError | httpx.TimeoutException | httpx2.TimeoutException):
+            return GatewayError("Downstream tool execution timed out.")
+        if isinstance(error, MCPError):
+            if error.code == REQUEST_TIMEOUT:
+                return GatewayError("Downstream tool execution timed out.")
+            return GatewayError("Downstream tool execution failed.")
+        if isinstance(error, FastMCPError | RuntimeError | httpx.HTTPError | httpx2.HTTPError):
+            return GatewayError("Downstream tool execution failed.")
+        logger.exception("Unexpected downstream MCP execution failure for tool %s", tool_id)
+        return GatewayError("Downstream tool execution failed.")
+
+    async def _downstream_authorization(
+        self,
+        session: AsyncSession,
+        current: AuthenticatedPrincipal,
+        server: MCPServer,
+    ) -> DownstreamAuthorization:
+        try:
+            return await DownstreamCredentialBroker(self._settings).authorize(
+                session, current, server
+            )
+        except DownstreamAuthorizationError as error:
+            raise GatewayError(str(error)) from None
+
     async def _execution_snapshot(
         self,
         session: AsyncSession,
         current: AuthenticatedPrincipal,
         tool_id: UUID,
         collection_slug: str | None,
-    ) -> tuple[str, str, dict[str, Any]]:
+    ) -> tuple[str, MCPServer, dict[str, Any], AuthenticatedPrincipal]:
         if session.bind is None:
             raise GatewayError("Gateway database session is not bound.")
         async with AsyncSession(bind=session.bind, expire_on_commit=False) as read_session:
@@ -392,7 +451,7 @@ class GatewayService:
                 collection_slug,
                 "tool:execute",
             )
-            return tool.name, server.endpoint, dict(tool.input_schema)
+            return tool.name, server, dict(tool.input_schema), refreshed_current
 
     async def _authorized_collections(
         self,
