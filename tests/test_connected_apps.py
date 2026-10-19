@@ -9,6 +9,8 @@ from pydantic import SecretStr
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from coyote_mcp import connected_apps
+from coyote_mcp.audit import AuditPersistenceError
 from coyote_mcp.auth import (
     AuthenticatedPrincipal,
     authenticate_browser_session,
@@ -41,6 +43,7 @@ from coyote_mcp.models import (
     DownstreamConnection,
     DownstreamOAuthIntegration,
     DownstreamOAuthTransaction,
+    DownstreamSharedCredential,
     ExternalGroup,
     GroupRoleMapping,
     InstanceAdministrator,
@@ -766,6 +769,40 @@ async def test_members_cannot_change_administrator_configuration(
         current = await _current(session, cookie)
         with pytest.raises(AuthorizationError):
             await set_shared_credential(session, settings, current, server.id, "shared-value")
+
+
+@pytest.mark.asyncio
+async def test_shared_credential_audit_failure_rolls_back_value(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings()
+    organization = await _organization(session_factory)
+    administrator = await _member(session_factory, organization, "owner")
+    server = await _server(session_factory, organization, policy="shared_bearer")
+    cookie = await _cookie(session_factory, administrator, organization)
+
+    async def failing_audit(*args: object, **kwargs: object) -> None:
+        raise AuditPersistenceError("audit storage unavailable")
+
+    monkeypatch.setattr(connected_apps, "record_principal_audit_event", failing_audit)
+    async with session_factory() as session:
+        with pytest.raises(AuditPersistenceError):
+            await set_shared_credential(
+                session, settings, await _current(session, cookie), server.id, "shared-value"
+            )
+        await session.rollback()
+
+    async with session_factory() as session:
+        assert (
+            await session.scalar(
+                select(DownstreamSharedCredential).where(
+                    DownstreamSharedCredential.organization_id == organization.id,
+                    DownstreamSharedCredential.server_id == server.id,
+                )
+            )
+            is None
+        )
 
 
 @pytest.mark.asyncio

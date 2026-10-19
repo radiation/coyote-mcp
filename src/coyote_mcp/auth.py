@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
+from coyote_mcp.audit import AuditAction, AuditTargetType, record_principal_audit_event
 from coyote_mcp.models import (
     BrowserSession,
     Collection,
@@ -351,6 +352,7 @@ async def issue_pat(
     settings: Settings,
     *,
     commit: bool = True,
+    actor: Principal | None = None,
 ) -> tuple[PersonalAccessToken, str]:
     if (
         not principal.enabled
@@ -383,6 +385,17 @@ async def issue_pat(
         expires_at=datetime.now(UTC) + lifetime,
     )
     session.add(token)
+    if actor is not None:
+        await session.flush()
+        await record_principal_audit_event(
+            session,
+            organization_id=organization_id,
+            actor=actor,
+            action=AuditAction.CREDENTIAL_CREATED,
+            target_type=AuditTargetType.CREDENTIAL,
+            target_id=token.id,
+            metadata={"credential_kind": "pat"},
+        )
     if commit:
         await session.commit()
     else:
@@ -637,6 +650,15 @@ async def create_initial_organization(
         )
         current.browser_session.active_organization_id = organization.id
         current.browser_session.csrf_epoch += 1
+        await record_principal_audit_event(
+            session,
+            organization_id=organization.id,
+            actor=current.principal,
+            action=AuditAction.ORGANIZATION_CREATED,
+            target_type=AuditTargetType.ORGANIZATION,
+            target_id=organization.id,
+            metadata={"organization_slug": organization.slug},
+        )
         await session.commit()
     except IntegrityError as error:
         await session.rollback()

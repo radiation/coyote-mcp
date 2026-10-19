@@ -2,6 +2,13 @@
 
 ## Completed
 
+- **Phase 5 P5-02B:** Successful security-sensitive state mutations now write
+  tenant-scoped, actor-attributed, append-only audit events in their existing
+  transactions. Coverage includes organization bootstrap, PATs, identity
+  administration, server/collection/publication configuration, downstream
+  authentication configuration, shared credentials, and Connected Apps. P5-02C
+  denial/failure/execution auditing, audit query/export/retention, and
+  asynchronous delivery remain deferred.
 - **Phase 1:** PostgreSQL-backed registration of Streamable HTTP MCP servers,
   generation-safe tool discovery, persisted catalog, and collections.
 - **Phase 2:** Organization-scoped roles and PATs; service principals;

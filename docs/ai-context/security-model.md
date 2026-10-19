@@ -252,8 +252,16 @@ prevent a privileged database operator from disabling triggers, changing the
 schema, or directly altering data. Retention is intentionally deferred to a
 separately authorized future policy.
 
-P5-02A does not yet emit application-wide events. P5-02B must instrument
-successful security-sensitive mutations through their existing transactions.
+P5-02B instruments successful security-sensitive mutations through their
+existing transactions: organization bootstrap; PAT issue/revocation;
+server, collection, membership, and publication changes; server authentication
+policy, OAuth integration, shared credential, and connected-app lifecycle
+changes; and the current service-principal and external-group role-mapping
+administration endpoints. The actual authorized principal is the actor, and
+the organization comes from the authorized tenant context rather than request
+input. System actors remain explicit and are never substituted for a missing
+human actor. No-op requests do not produce success events.
+
 P5-02C must define explicit independent-write policy for authorization denials,
 authentication failures, MCP outcomes, and read-only security events that occur
 outside a mutation transaction. Execution cancellation and fine-grained

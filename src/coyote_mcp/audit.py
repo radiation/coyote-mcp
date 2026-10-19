@@ -10,7 +10,7 @@ from sqlalchemy import event
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coyote_mcp.models import AuditEvent
+from coyote_mcp.models import AuditEvent, Principal
 from coyote_mcp.runtime import request_id
 
 type AuditMetadataValue = str | int | bool
@@ -47,6 +47,10 @@ class AuditAction(StrEnum):
     PUBLICATION_DELETED = "publication.deleted"
     CREDENTIAL_CREATED = "credential.created"
     CREDENTIAL_REVOKED = "credential.revoked"
+    PRINCIPAL_CREATED = "principal.created"
+    PRINCIPAL_DISABLED = "principal.disabled"
+    GROUP_CREATED = "group.created"
+    ROLE_MAPPING_CREATED = "role_mapping.created"
     CONNECTION_STARTED = "connection.started"
     CONNECTION_CONNECTED = "connection.connected"
     CONNECTION_DISCONNECTED = "connection.disconnected"
@@ -103,6 +107,10 @@ _METADATA_FIELDS: dict[AuditAction, frozenset[str]] = {
     AuditAction.PUBLICATION_DELETED: frozenset(),
     AuditAction.CREDENTIAL_CREATED: frozenset({"credential_kind", "key_version"}),
     AuditAction.CREDENTIAL_REVOKED: frozenset({"credential_kind"}),
+    AuditAction.PRINCIPAL_CREATED: frozenset({"identity_type", "role_count"}),
+    AuditAction.PRINCIPAL_DISABLED: frozenset({"identity_type"}),
+    AuditAction.GROUP_CREATED: frozenset(),
+    AuditAction.ROLE_MAPPING_CREATED: frozenset({"role", "scope"}),
     AuditAction.CONNECTION_STARTED: frozenset({"provider"}),
     AuditAction.CONNECTION_CONNECTED: frozenset({"provider"}),
     AuditAction.CONNECTION_DISCONNECTED: frozenset({"provider", "revocation_result"}),
@@ -183,6 +191,32 @@ async def record_audit_event(
     except SQLAlchemyError as error:
         raise AuditPersistenceError("Audit event persistence failed.") from error
     return audit_event
+
+
+async def record_principal_audit_event(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    actor: Principal,
+    action: AuditAction,
+    target_type: AuditTargetType,
+    target_id: UUID | None,
+    metadata: Mapping[str, AuditMetadataValue] | None = None,
+) -> AuditEvent:
+    """Record a successful event initiated by a persisted principal."""
+    return await record_audit_event(
+        session,
+        organization_id=organization_id,
+        actor_type=(
+            AuditActorType.SERVICE if actor.identity_type == "service" else AuditActorType.HUMAN
+        ),
+        actor_id=actor.id,
+        action=action,
+        target_type=target_type,
+        target_id=target_id,
+        outcome=AuditOutcome.SUCCESS,
+        metadata=metadata,
+    )
 
 
 def _reject_audit_event_mutation(*_: object) -> None:

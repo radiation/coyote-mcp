@@ -65,6 +65,7 @@ class AuditEvent(Base):
             "'collection.membership_removed', "
             "'publication.created', 'publication.updated', 'publication.deleted', "
             "'credential.created', 'credential.revoked', "
+            "'principal.created', 'principal.disabled', 'group.created', 'role_mapping.created', "
             "'connection.started', 'connection.connected', 'connection.disconnected', "
             "'policy.updated', 'authentication.failed', 'authorization.denied', "
             "'mcp.execution'"

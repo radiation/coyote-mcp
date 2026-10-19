@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coyote_mcp import catalog
+from coyote_mcp.audit import AuditAction, AuditTargetType, record_principal_audit_event
 from coyote_mcp.auth import (
     ROLE_PERMISSIONS,
     AuthenticatedPrincipal,
@@ -435,6 +436,7 @@ async def create_pat(request: PATCreate, session: Session, current: Current) -> 
             request.scopes,
             timedelta(seconds=request.lifetime_seconds),
             Settings(),
+            actor=current.principal,
         )
     except ValueError as error:
         raise HTTPException(
@@ -455,7 +457,17 @@ async def revoke_pat(token_id: UUID, session: Session, current: Current) -> None
     )
     if token is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found.")
-    token.revoked_at = datetime.now(UTC)
+    if token.revoked_at is None:
+        token.revoked_at = datetime.now(UTC)
+        await record_principal_audit_event(
+            session,
+            organization_id=current.require_organization_id(),
+            actor=current.principal,
+            action=AuditAction.CREDENTIAL_REVOKED,
+            target_type=AuditTargetType.CREDENTIAL,
+            target_id=token.id,
+            metadata={"credential_kind": "pat"},
+        )
     await session.commit()
 
 
@@ -520,6 +532,15 @@ async def create_service_principal(
                 for role in request.roles
             ]
         )
+        await record_principal_audit_event(
+            session,
+            organization_id=current.require_organization_id(),
+            actor=current.principal,
+            action=AuditAction.PRINCIPAL_CREATED,
+            target_type=AuditTargetType.PRINCIPAL,
+            target_id=principal.id,
+            metadata={"identity_type": "service", "role_count": len(request.roles)},
+        )
         await session.commit()
     except IntegrityError as error:
         await session.rollback()
@@ -557,7 +578,17 @@ async def disable_service_principal(principal_id: UUID, session: Session, curren
     principal = await service_principal_or_404(
         session, current.require_organization_id(), principal_id
     )
-    principal.enabled = False
+    if principal.enabled:
+        principal.enabled = False
+        await record_principal_audit_event(
+            session,
+            organization_id=current.require_organization_id(),
+            actor=current.principal,
+            action=AuditAction.PRINCIPAL_DISABLED,
+            target_type=AuditTargetType.PRINCIPAL,
+            target_id=principal.id,
+            metadata={"identity_type": "service"},
+        )
     await session.commit()
 
 
@@ -591,6 +622,7 @@ async def issue_service_pat(
             request.scopes,
             timedelta(seconds=request.lifetime_seconds),
             Settings(),
+            actor=current.principal,
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
@@ -614,7 +646,17 @@ async def revoke_service_pat(
     )
     if token is None:
         raise HTTPException(status_code=404, detail="Resource not found.")
-    token.revoked_at = datetime.now(UTC)
+    if token.revoked_at is None:
+        token.revoked_at = datetime.now(UTC)
+        await record_principal_audit_event(
+            session,
+            organization_id=current.require_organization_id(),
+            actor=current.principal,
+            action=AuditAction.CREDENTIAL_REVOKED,
+            target_type=AuditTargetType.CREDENTIAL,
+            target_id=token.id,
+            metadata={"credential_kind": "pat"},
+        )
     await session.commit()
 
 
@@ -630,6 +672,15 @@ async def create_external_group(
     )
     session.add(group)
     try:
+        await session.flush()
+        await record_principal_audit_event(
+            session,
+            organization_id=current.require_organization_id(),
+            actor=current.principal,
+            action=AuditAction.GROUP_CREATED,
+            target_type=AuditTargetType.POLICY,
+            target_id=group.id,
+        )
         await session.commit()
     except IntegrityError as error:
         await session.rollback()
@@ -662,6 +713,19 @@ async def create_group_role_mapping(
     )
     session.add(mapping)
     try:
+        await session.flush()
+        await record_principal_audit_event(
+            session,
+            organization_id=current.require_organization_id(),
+            actor=current.principal,
+            action=AuditAction.ROLE_MAPPING_CREATED,
+            target_type=AuditTargetType.POLICY,
+            target_id=mapping.id,
+            metadata={
+                "role": mapping.role,
+                "scope": "collection" if mapping.collection_id is not None else "organization",
+            },
+        )
         await session.commit()
     except IntegrityError as error:
         await session.rollback()

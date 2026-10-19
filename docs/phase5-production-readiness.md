@@ -315,14 +315,42 @@ and migration documentation. Complexity: **M**.
 
 ### P5-02 - Append-only security audit events (L)
 
-**P5-02A status: implemented on 2026-10-19.** Migration `0021` adds the
+**P5-02A status: implemented on 2026-10-19. P5-02B status: implemented on
+2026-10-19.** Migration `0021` adds the
 tenant-scoped append-only audit ledger, and `audit.record_audit_event` writes
 validated events through the caller's existing transaction. PostgreSQL triggers
 reject updates and deletes; SQLAlchemy also rejects ordinary ORM mutation.
 Audit records retain actor and target UUID snapshots without foreign keys, so
 they remain interpretable if a principal or target is later removed. Event names,
 outcomes, actor types, target types, and compact metadata fields are allowlisted.
-The remaining P5-02 instrumentation is deliberately deferred.
+P5-02B records successful events in the same transaction for the following
+implementation inventory:
+
+| Service boundary | Mutation and audit action | Target and safe metadata | Transaction ownership |
+| --- | --- | --- | --- |
+| `auth.create_initial_organization` | Organization bootstrap / `organization.created` | Organization; slug | Existing service transaction |
+| `auth.issue_pat` (when an initiating actor is supplied) and API revocation handlers | PAT issue or revoke / `credential.created` or `credential.revoked` | Credential; `credential_kind=pat` | Existing service or API transaction |
+| `catalog.register_server`, `update_server`, `set_server_enabled`, `delete_server` | Server registration, edit, state transition, removal | Server; name/transport or changed fields | Catalog service transaction |
+| `catalog.register_collection`, `update_collection`, membership and publication methods | Collection, membership, and publication changes | Collection/publication; slugs, server IDs, aliases, changed fields | Catalog service transaction |
+| `connected_apps` policy, integration, and shared-credential methods | Authentication policy and OAuth configuration, shared credential replacement/removal | Server/credential; changed field, credential kind/key version | Connected Apps service transaction |
+| `connected_apps` connection lifecycle | OAuth start, connected credential storage, local disconnect | Connection; provider and local revocation state | Connected Apps service transaction |
+| Identity-management API boundaries | Service-principal creation/disable and external-group role mapping | Principal/policy; identity type, role count, scope | Existing API-owned transaction |
+
+No audit event is emitted for a no-op state request. Events are emitted after
+authorization and before the owning commit; a failed audit flush therefore
+prevents that commit. Metadata intentionally excludes plaintext PATs,
+credentials, OAuth codes/tokens, client secrets, endpoints, and error bodies.
+
+`complete_connection` retains its pre-existing short transaction that consumes
+the single-use OAuth callback state before external token exchange. The durable
+event covers the later successful local connection replacement and commits with
+that credential state. Auditing the earlier consumption atomically would require
+holding a database transaction across untrusted provider I/O, so it is not
+given a non-atomic success event in P5-02B.
+
+P5-02C remains deliberately deferred: authentication failures, authorization
+denials, MCP execution outcomes, read-only security activity, audit query/UI,
+export/retention, and asynchronous delivery are not implemented here.
 
 **Objective and scope:** Record security-significant administrative, identity,
 credential, policy/publication, server, OAuth-connection, and execution events

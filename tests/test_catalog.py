@@ -4,9 +4,11 @@ from uuid import UUID, uuid4
 
 import pytest
 from pydantic import HttpUrl
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coyote_mcp import catalog
+from coyote_mcp.audit import AuditAction, AuditPersistenceError
 from coyote_mcp.auth import AuthenticatedPrincipal
 from coyote_mcp.discovery import (
     DiscoveredTool,
@@ -15,7 +17,14 @@ from coyote_mcp.discovery import (
     SyncSupersededError,
     reconcile_tools,
 )
-from coyote_mcp.models import Organization, OrganizationMembership, Principal, RoleAssignment, Tool
+from coyote_mcp.models import (
+    AuditEvent,
+    Organization,
+    OrganizationMembership,
+    Principal,
+    RoleAssignment,
+    Tool,
+)
 from coyote_mcp.schemas import (
     CollectionCreate,
     CollectionUpdate,
@@ -47,6 +56,95 @@ async def test_server_duplicate_name_is_rejected(session, organization: Organiza
     await catalog.create_server(session, organization.id, server_request())
     with pytest.raises(catalog.DuplicateResourceError):
         await catalog.create_server(session, organization.id, server_request())
+
+
+@pytest.mark.asyncio
+async def test_register_server_records_one_actor_attributed_audit_event(
+    session: AsyncSession, organization: Organization
+) -> None:
+    principal = Principal(identifier="audit-owner", display_name="Audit Owner")
+    session.add(principal)
+    await session.flush()
+    session.add_all(
+        [
+            OrganizationMembership(organization_id=organization.id, principal_id=principal.id),
+            RoleAssignment(
+                organization_id=organization.id, principal_id=principal.id, role="owner"
+            ),
+        ]
+    )
+    await session.commit()
+    current = AuthenticatedPrincipal(principal, frozenset({"server:create"}), None, organization.id)
+
+    server = await catalog.register_server(session, current, server_request("audited"))
+
+    events = list(
+        (
+            await session.scalars(
+                select(AuditEvent).where(
+                    AuditEvent.organization_id == organization.id,
+                    AuditEvent.target_id == server.id,
+                )
+            )
+        ).all()
+    )
+    assert len(events) == 1
+    assert events[0].actor_id == principal.id
+    assert events[0].action == AuditAction.SERVER_CREATED.value
+    assert events[0].metadata_ == {"server_name": "audited", "transport": "streamable_http"}
+
+
+@pytest.mark.asyncio
+async def test_collection_update_noop_is_not_audited_and_audit_failure_rolls_back(
+    session: AsyncSession, organization: Organization, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    principal = Principal(identifier="collection-auditor", display_name="Collection Auditor")
+    session.add(principal)
+    await session.flush()
+    session.add_all(
+        [
+            OrganizationMembership(organization_id=organization.id, principal_id=principal.id),
+            RoleAssignment(
+                organization_id=organization.id, principal_id=principal.id, role="owner"
+            ),
+        ]
+    )
+    collection = await catalog.create_collection(
+        session,
+        organization.id,
+        CollectionCreate(slug="audit-collection", display_name="Audit Collection"),
+    )
+    organization_id = organization.id
+    collection_id = collection.id
+    current = AuthenticatedPrincipal(
+        principal, frozenset({"collection:update"}), None, organization.id
+    )
+
+    await catalog.update_collection(
+        session, current, collection.id, CollectionUpdate(display_name=collection.display_name)
+    )
+    assert (
+        await session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.target_id == collection.id,
+                AuditEvent.action == AuditAction.COLLECTION_UPDATED.value,
+            )
+        )
+        is None
+    )
+
+    async def failing_audit(*args: object, **kwargs: object) -> None:
+        raise AuditPersistenceError("audit storage unavailable")
+
+    monkeypatch.setattr(catalog, "record_principal_audit_event", failing_audit)
+    with pytest.raises(AuditPersistenceError):
+        await catalog.update_collection(
+            session, current, collection_id, CollectionUpdate(exposure_mode="native")
+        )
+    await session.rollback()
+
+    stored = await catalog.get_collection(session, organization_id, collection_id)
+    assert stored.exposure_mode == "discovery"
 
 
 @pytest.mark.asyncio

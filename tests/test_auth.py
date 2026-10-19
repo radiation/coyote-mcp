@@ -4,6 +4,8 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from coyote_mcp import auth
+from coyote_mcp.audit import AuditPersistenceError
 from coyote_mcp.auth import (
     ALL_ACTIONS,
     ExternalIdentityResolutionError,
@@ -30,6 +32,7 @@ from coyote_mcp.models import (
     InstanceAdministrator,
     Organization,
     OrganizationMembership,
+    PersonalAccessToken,
     Principal,
     RoleAssignment,
 )
@@ -95,6 +98,37 @@ async def test_pat_scope_attenuation_and_expiry(session, organization: Organizat
         await issue_pat(
             session, principal, organization.id, "expired", {"server:read"}, timedelta(), Settings()
         )
+
+
+@pytest.mark.asyncio
+async def test_pat_audit_failure_rolls_back_token(
+    session, organization: Organization, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    principal = await create_principal(session, organization)
+
+    async def failing_audit(*args: object, **kwargs: object) -> None:
+        raise AuditPersistenceError("audit storage unavailable")
+
+    monkeypatch.setattr(auth, "record_principal_audit_event", failing_audit)
+    with pytest.raises(AuditPersistenceError):
+        await issue_pat(
+            session,
+            principal,
+            organization.id,
+            "audited-token",
+            {"server:read"},
+            timedelta(days=1),
+            Settings(),
+            actor=principal,
+        )
+    await session.rollback()
+
+    assert (
+        await session.scalar(
+            select(PersonalAccessToken).where(PersonalAccessToken.name == "audited-token")
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio
