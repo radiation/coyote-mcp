@@ -425,7 +425,7 @@ async def list_collection_memberships(
         .order_by(MCPServer.display_name, MCPServer.id)
         .limit(limit)
     )
-    return [(membership, server) for membership, server in rows.tuples().all()]
+    return [(membership, server) for membership, server in rows.all()]
 
 
 async def list_addable_servers(
@@ -470,7 +470,7 @@ async def list_collection_tool_rows(
         .limit(limit)
         .offset(offset)
     )
-    return [(tool, server) for tool, server in rows.tuples().all()]
+    return [(tool, server) for tool, server in rows.all()]
 
 
 async def remove_membership(
@@ -561,7 +561,7 @@ async def list_publication_rows(
     )
     return [
         (publication, tool, server, membership_enabled)
-        for publication, tool, server, membership_enabled in rows.tuples().all()
+        for publication, tool, server, membership_enabled in rows.all()
     ]
 
 
@@ -593,7 +593,7 @@ async def list_unpublished_collection_tools(
         .limit(limit)
         .offset(offset)
     )
-    return [(tool, server) for tool, server in rows.tuples().all()]
+    return [(tool, server) for tool, server in rows.all()]
 
 
 async def list_organization_tool_rows(
@@ -607,7 +607,7 @@ async def list_organization_tool_rows(
         .limit(limit)
         .offset(offset)
     )
-    return [(tool, server) for tool, server in rows.tuples().all()]
+    return [(tool, server) for tool, server in rows.all()]
 
 
 async def count_tool_publications(
@@ -624,7 +624,7 @@ async def count_tool_publications(
         )
         .group_by(CollectionToolPublication.tool_id)
     )
-    return {tool_id: count for tool_id, count in rows.tuples().all()}
+    return {tool_id: count for tool_id, count in rows.all()}
 
 
 def publication_exposure_issues(
@@ -782,7 +782,7 @@ async def read_publication(
             CollectionToolPublication.collection_id == collection_id,
         )
     )
-    result = row.tuples().one_or_none()
+    result = row.one_or_none()
     if result is None:
         raise MissingResourceError("Tool publication not found.")
     return result

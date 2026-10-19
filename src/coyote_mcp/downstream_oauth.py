@@ -103,13 +103,24 @@ def callback_redirect_uri(settings: Settings) -> str:
     parsed = urlparse(base)
     if parsed.scheme not in {"https", "http"} or not parsed.hostname:
         raise OAuthConfigurationError("Downstream OAuth redirect base URL must be absolute.")
-    if parsed.scheme == "http" and not settings.allow_insecure_endpoints:
-        raise OAuthConfigurationError("Downstream OAuth redirects must use HTTPS.")
+    if parsed.scheme == "http" and not _local_http_redirect_allowed(settings, parsed.hostname):
+        raise OAuthConfigurationError(
+            "Downstream OAuth redirects must use HTTPS except for explicitly enabled "
+            "development loopback callbacks."
+        )
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise OAuthConfigurationError("Downstream OAuth redirect base URL is malformed.")
     if parsed.path not in {"", "/"}:
         raise OAuthConfigurationError("Downstream OAuth redirect base URL must be an origin.")
     return f"{parsed.scheme}://{parsed.netloc}{CALLBACK_PATH}"
+
+
+def _local_http_redirect_allowed(settings: Settings, hostname: str) -> bool:
+    return (
+        settings.is_development
+        and settings.allow_insecure_endpoints
+        and hostname in {"localhost", "127.0.0.1", "::1"}
+    )
 
 
 def validate_oauth_endpoint(endpoint: str, settings: Settings) -> None:

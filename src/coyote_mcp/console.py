@@ -290,7 +290,7 @@ async def create_organization(request: Request, session: Session) -> Response:
             session,
             current,
             creation_error="Enter a valid organization slug and display name.",
-            response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            response_status=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     try:
         organization_request = OrganizationCreate(slug=slug, display_name=display_name)
@@ -306,7 +306,7 @@ async def create_organization(request: Request, session: Session) -> Response:
             session,
             current,
             creation_error="Enter a valid organization slug and display name.",
-            response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            response_status=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     except OrganizationBootstrapError as error:
         if error.category == "duplicate_slug":
@@ -559,7 +559,7 @@ async def server_register(request: Request, session: Session) -> Response:
             server=None,
             values=values,
             error="Enter a lowercase server name, a display name, and an HTTPS endpoint URL.",
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     except UnsafeEndpointError as error:
         return await _server_form_response(
@@ -569,7 +569,7 @@ async def server_register(request: Request, session: Session) -> Response:
             server=None,
             values=values,
             error=str(error),
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     except catalog.DuplicateResourceError as error:
         return await _server_form_response(
@@ -656,7 +656,7 @@ async def server_update(server_id: UUID, request: Request, session: Session) -> 
             server=server,
             values={"display_name": display_name},
             error=message,
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     return _see_other("/console/servers/" + str(server_id))
 
@@ -669,7 +669,7 @@ async def server_set_enabled(server_id: UUID, request: Request, session: Session
     current, form = result
     enabled = _form_text(form, "enabled")
     if enabled not in {"true", "false"}:
-        return HTMLResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY)
+        return HTMLResponse(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
     try:
         await catalog.set_server_enabled(session, current, server_id, enabled == "true")
     except catalog.MissingResourceError:
@@ -951,7 +951,7 @@ async def collection_create(request: Request, session: Session) -> Response:
                 "Enter a lowercase slug, a display name of up to 160 characters, "
                 "a description of up to 1000 characters, and a supported exposure mode."
             ),
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     except catalog.DuplicateResourceError as error:
         return await _collection_form_response(
@@ -1055,7 +1055,7 @@ async def collection_update(collection_id: UUID, request: Request, session: Sess
                 "Enter a display name of up to 160 characters, a description of up to "
                 "1000 characters, and a supported exposure mode."
             ),
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     return _see_other("/console/collections/" + str(collection_id))
 
@@ -1070,7 +1070,7 @@ async def collection_set_enabled(
     current, form = result
     enabled = _form_text(form, "enabled")
     if enabled not in {"true", "false"}:
-        return HTMLResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY)
+        return HTMLResponse(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
     try:
         await catalog.update_collection(
             session, current, collection_id, CollectionUpdate(enabled=enabled == "true")
@@ -1099,7 +1099,7 @@ async def collection_add_server(
             current,
             collection_id,
             "Choose a server to add.",
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     try:
         await catalog.add_collection_member(session, current, collection_id, server_id)
@@ -1110,7 +1110,7 @@ async def collection_add_server(
             current,
             collection_id,
             "Choose a server from this organization.",
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     except catalog.DuplicateResourceError as error:
         return await _collection_action_error(
@@ -1405,7 +1405,7 @@ async def publication_create(collection_id: UUID, request: Request, session: Ses
             current,
             collection_id,
             TOOL_CHOICE_MESSAGE,
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             draft=draft,
         )
     try:
@@ -1417,7 +1417,7 @@ async def publication_create(collection_id: UUID, request: Request, session: Ses
             current,
             collection_id,
             PUBLISHED_NAME_MESSAGE,
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             draft=draft,
         )
     try:
@@ -1429,7 +1429,7 @@ async def publication_create(collection_id: UUID, request: Request, session: Ses
             current,
             collection_id,
             TOOL_CHOICE_MESSAGE,
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             draft=draft,
         )
     except catalog.DuplicateResourceError as error:
@@ -1508,7 +1508,7 @@ async def publication_update(
             publication_id,
             values=values,
             message=PUBLICATION_FORM_MESSAGE,
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     except catalog.DuplicateResourceError as error:
         return await _publication_edit_error(
@@ -1612,7 +1612,7 @@ async def connected_app_callback(
             session,
             current,
             action_error=str(failure),
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     except catalog.AuthorizationError:
         return _render_forbidden(request, current)
@@ -1639,7 +1639,7 @@ async def connected_app_connect(server_id: UUID, request: Request, session: Sess
             session,
             current,
             action_error=str(failure),
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     # The URL is built from validated provider endpoints and a single-use transaction.
     return RedirectResponse(authorization_url, status_code=status.HTTP_303_SEE_OTHER)
@@ -1717,7 +1717,7 @@ async def _authentication_mutation(
             current,
             server_id,
             action_error=str(failure),
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     return _see_other(f"/console/servers/{server_id}/authentication")
 

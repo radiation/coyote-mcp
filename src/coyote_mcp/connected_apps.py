@@ -212,30 +212,37 @@ def _integration_view(integration: DownstreamOAuthIntegration) -> IntegrationVie
     )
 
 
+async def _authorized_server_actions(
+    session: AsyncSession, current: AuthenticatedPrincipal, server_id: UUID, *actions: str
+) -> MCPServer:
+    server = await get_server(session, current.require_organization_id(), server_id)
+    for action in actions:
+        if action not in current.scopes:
+            raise AuthorizationError("Insufficient permissions.")
+        decision = await authorize(
+            session,
+            current.principal,
+            action,
+            server,
+            verified_group_ids=current.verified_group_ids,
+            credential_context=current.credential_context,
+        )
+        if not decision.allowed:
+            raise AuthorizationError("Insufficient permissions.")
+    return server
+
+
 async def _authorized_server(
     session: AsyncSession, current: AuthenticatedPrincipal, action: str, server_id: UUID
 ) -> MCPServer:
-    server = await get_server(session, current.require_organization_id(), server_id)
-    if action not in current.scopes:
-        raise AuthorizationError("Insufficient permissions.")
-    decision = await authorize(
-        session,
-        current.principal,
-        action,
-        server,
-        verified_group_ids=current.verified_group_ids,
-        credential_context=current.credential_context,
-    )
-    if not decision.allowed:
-        raise AuthorizationError("Insufficient permissions.")
-    return server
+    return await _authorized_server_actions(session, current, server_id, action)
 
 
 async def _authorized_member(session: AsyncSession, current: AuthenticatedPrincipal) -> UUID:
     """Authorize a human member to manage their own connections in the active organization.
 
-    Instance-administrator status is not sufficient on its own: the caller must
-    hold an enabled membership, and connections are always keyed to the caller.
+    Enabled members need a direct or verified-group role grant. Browser-session
+    instance administrators may also manage only their own connections.
     """
     organization_id = current.require_organization_id()
     if current.principal.identity_type != "human" or CONNECTED_APP_ACTION not in current.scopes:
@@ -246,6 +253,7 @@ async def _authorized_member(session: AsyncSession, current: AuthenticatedPrinci
         organization_id,
         CONNECTED_APP_ACTION,
         current.verified_group_ids,
+        current.credential_context,
     ):
         raise AuthorizationError("Insufficient permissions.")
     return organization_id
@@ -267,7 +275,9 @@ async def set_auth_policy(
 ) -> MCPServer:
     if policy not in AUTH_POLICIES:
         raise ConnectedAppError("invalid_policy", "Unsupported authentication policy.")
-    server = await _authorized_server(session, current, "server:update", server_id)
+    server = await _authorized_server_actions(
+        session, current, server_id, "server:update", "credential:create"
+    )
     server.auth_policy = policy
     await session.commit()
     return server
@@ -315,7 +325,9 @@ async def save_integration(
     server_id: UUID,
     data: IntegrationInput,
 ) -> IntegrationView:
-    server = await _authorized_server(session, current, "server:update", server_id)
+    server = await _authorized_server_actions(
+        session, current, server_id, "server:update", "credential:create"
+    )
     organization_id = server.organization_id
     provider = data.provider.strip().lower()
     if provider not in PROVIDERS:
@@ -408,7 +420,9 @@ async def set_integration_enabled(
     server_id: UUID,
     enabled: bool,
 ) -> IntegrationView:
-    server = await _authorized_server(session, current, "server:update", server_id)
+    server = await _authorized_server_actions(
+        session, current, server_id, "server:update", "credential:create"
+    )
     integration = await _integration_for(session, server.organization_id, server_id)
     if integration is None:
         raise MissingResourceError("This server has no OAuth integration configured.")
@@ -428,7 +442,9 @@ async def set_shared_credential(
     server_id: UUID,
     value: str,
 ) -> None:
-    server = await _authorized_server(session, current, "credential:create", server_id)
+    server = await _authorized_server_actions(
+        session, current, server_id, "server:update", "credential:create"
+    )
     if (
         not value
         or len(value) > MAX_SHARED_CREDENTIAL_LENGTH
@@ -476,7 +492,9 @@ async def set_shared_credential(
 async def clear_shared_credential(
     session: AsyncSession, current: AuthenticatedPrincipal, server_id: UUID
 ) -> None:
-    server = await _authorized_server(session, current, "credential:revoke", server_id)
+    server = await _authorized_server_actions(
+        session, current, server_id, "server:update", "credential:revoke"
+    )
     await session.execute(
         delete(DownstreamSharedCredential).where(
             DownstreamSharedCredential.organization_id == server.organization_id,

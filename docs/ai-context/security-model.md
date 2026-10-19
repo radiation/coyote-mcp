@@ -86,8 +86,8 @@ account; a shared credential is never substituted when a user's connection is
 missing, expired, or revoked.
 
 - **Encryption:** Credentials are sealed with AES-256-GCM. Keys come from
-  `CREDENTIAL_ENCRYPTION_KEYS` (a JSON object mapping version to a base64url
-  32-byte key) and `CREDENTIAL_ACTIVE_KEY_VERSION`. Keys are required before any
+  `COYOTE_CREDENTIAL_ENCRYPTION_KEYS` (a JSON object mapping version to a base64url
+  32-byte key) and `COYOTE_CREDENTIAL_ACTIVE_KEY_VERSION`. Keys are required before any
   secret or connection can be written; without them those operations fail closed. Each value's additional
   authenticated data binds the domain and its owner: `(organization, server)` for
   shared credentials and client secrets, `(organization, server, principal)` for
@@ -109,9 +109,11 @@ missing, expired, or revoked.
   `authorization_not_configured`.
 - **Service principals** cannot start, complete, or use a personal connection, so
   `per_user_oauth` servers fail closed for them.
-- **Instance administrators** gain no downstream access through browser
-  administration. Authorization for a tool still requires the caller's own
-  connection.
+- **Instance administrators** using a browser session may manage only their own
+  downstream connections in an enabled organization without an explicit
+  membership. This self-service exception never applies to PATs, service
+  principals, or another principal's connection. Authorization for a tool still
+  requires the caller's own connection.
 - **Refresh:** Refresh runs under a row lock (`SELECT ... FOR UPDATE` on
   PostgreSQL) and is held across the token request. Rejected grants
   (`invalid_grant`, `invalid_client`, `unauthorized_client`) mark the connection
@@ -125,7 +127,12 @@ missing, expired, or revoked.
   expired, or mismatched callback fails. A provider error also consumes the
   transaction. Endpoints must be HTTPS public destinations, redirects are disabled,
   DNS is pinned, and the redirect URI is fixed to
-  `DOWNSTREAM_OAUTH_REDIRECT_BASE_URL` plus `/console/connected-apps/callback`.
+  `COYOTE_DOWNSTREAM_OAUTH_REDIRECT_BASE_URL` plus `/console/connected-apps/callback`.
+  HTTPS is required except when `ENVIRONMENT=development` and
+  `ALLOW_INSECURE_ENDPOINTS=true`: only the literal loopback hosts `localhost`,
+  `127.0.0.1`, and `::1` may then use HTTP. This exception applies only to the
+  local callback origin, not provider authorization, token, account, or
+  revocation endpoints.
 - **Providers:** The GitHub preset overrides submitted endpoints with the
   documented `github.com` OAuth endpoints. Generic providers must supply every
   endpoint explicitly. Authorization-server metadata discovery (RFC 8414) and
@@ -135,10 +142,10 @@ missing, expired, or revoked.
   OAuth Apps have no revocation endpoint here, so disconnect removes local
   credentials only and reports that the grant remains active at the provider.
   Replacing a connection does not revoke the previous grant.
-- **Self-service:** `connection:manage_own` lets any enabled member who holds an
-  organization-wide or collection-scoped role manage their own connections. Every
-  query is keyed by the caller's principal, so one user cannot read or change
-  another user's connection.
+- **Self-service:** `connection:manage_own` lets any enabled member with a
+  direct or verified-group organization-wide or collection-scoped role manage
+  their own connections. Every query is keyed by the caller's principal, so one
+  user cannot read or change another user's connection.
 - **Administration:** Configuring policy, integrations, and shared credentials
   requires `server:update` and `credential:*`. Secret fields are write-only: the
   console shows only whether a value is stored. These writes do not yet produce

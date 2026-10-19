@@ -17,10 +17,14 @@ that must preserve these invariants.
   membership and roles remain required for ordinary principals. An enabled
   instance administrator is the sole shared override for browser-session
   organization administration and does not create synthetic memberships or
-  owner roles. PAT-authenticated REST calls retain their explicit scopes and
-  role evaluation. Callers must enforce that decision in application services,
-  not exclusively in HTTP handlers. Collection-list authorization stays
-  membership-based for PAT-authenticated MCP discovery and execution.
+  owner roles. A browser-session instance administrator may use the narrowly
+  scoped `connection:manage_own` self-service action for only their own
+  downstream connections in an enabled organization; this exception does not
+  apply to PATs, service principals, or tool execution. PAT-authenticated REST
+  calls retain their explicit scopes and role evaluation. Callers must enforce
+  that decision in application services, not exclusively in HTTP handlers.
+  Collection-list authorization stays membership-based for PAT-authenticated MCP
+  discovery and execution.
 - **PAT scopes attenuate permissions.** PATs remain bound to one organization.
   PAT creation requires requested scopes to be a subset of the principal's
   direct role permissions; a request must satisfy both its token scope and

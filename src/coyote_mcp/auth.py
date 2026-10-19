@@ -723,6 +723,7 @@ async def self_service_action_allowed(
     organization_id: UUID,
     action: str,
     verified_group_ids: frozenset[str] = frozenset(),
+    credential_context: CredentialContext = "browser_session",
 ) -> bool:
     """Allow a member to act on their own resources in an organization.
 
@@ -735,6 +736,10 @@ async def self_service_action_allowed(
         return False
     if not await _enabled_organization(session, organization_id):
         return False
+    if credential_context == "browser_session" and await is_instance_administrator(
+        session, principal
+    ):
+        return True
     if await _enabled_membership(session, principal.id, organization_id) is None:
         return False
     roles = set(

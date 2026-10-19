@@ -117,7 +117,7 @@ async def register_server(
         )
     except UnsafeEndpointError as error:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
         ) from error
     except catalog.DuplicateResourceError as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
@@ -438,7 +438,7 @@ async def create_pat(request: PATCreate, session: Session, current: Current) -> 
         )
     except ValueError as error:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
         ) from error
     return PATCreatedResponse(**PATResponse.model_validate(token).model_dump(), token=plaintext)
 

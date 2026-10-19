@@ -66,6 +66,30 @@ def _public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("coyote_mcp.security.socket.getaddrinfo", resolve)
 
 
+def test_settings_accepts_coyote_downstream_configuration_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = _key()
+    for name in (
+        "CREDENTIAL_ENCRYPTION_KEYS",
+        "CREDENTIAL_ACTIVE_KEY_VERSION",
+        "DOWNSTREAM_OAUTH_REDIRECT_BASE_URL",
+        "DOWNSTREAM_OAUTH_TIMEOUT_SECONDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("COYOTE_CREDENTIAL_ENCRYPTION_KEYS", f'{{"v1":"{key}"}}')
+    monkeypatch.setenv("COYOTE_CREDENTIAL_ACTIVE_KEY_VERSION", "v1")
+    monkeypatch.setenv("COYOTE_DOWNSTREAM_OAUTH_REDIRECT_BASE_URL", "https://coyote.example.test")
+    monkeypatch.setenv("COYOTE_DOWNSTREAM_OAUTH_TIMEOUT_SECONDS", "12.5")
+
+    settings = Settings()
+
+    assert settings.credential_encryption_keys["v1"].get_secret_value() == key
+    assert settings.credential_active_key_version == "v1"
+    assert settings.downstream_oauth_redirect_base_url == "https://coyote.example.test"
+    assert settings.downstream_oauth_timeout_seconds == 12.5
+
+
 # --- Credential vault -----------------------------------------------------------------
 
 
@@ -150,6 +174,51 @@ def test_redirect_uri_is_derived_from_configured_base_only() -> None:
         callback_redirect_uri(_settings(downstream_oauth_redirect_base_url=None))
     with pytest.raises(OAuthConfigurationError):
         callback_redirect_uri(_settings(downstream_oauth_redirect_base_url="javascript:alert(1)"))
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "http://[::1]:8000",
+    ],
+)
+def test_local_http_redirect_uri_requires_explicit_development_configuration(base: str) -> None:
+    settings = _settings(
+        downstream_oauth_redirect_base_url=base,
+        allow_insecure_endpoints=True,
+    )
+
+    assert callback_redirect_uri(settings) == f"{base}/console/connected-apps/callback"
+
+    with pytest.raises(OAuthConfigurationError, match="must use HTTPS"):
+        callback_redirect_uri(settings.model_copy(update={"allow_insecure_endpoints": False}))
+    with pytest.raises(OAuthConfigurationError, match="must use HTTPS"):
+        callback_redirect_uri(settings.model_copy(update={"environment": "production"}))
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        "http://192.168.1.10:8000",
+        "http://10.0.0.5:8000",
+        "http://127.0.0.2:8000",
+        "http://coyote.local:8000",
+        "http://smoke-mcp:8000",
+    ],
+)
+def test_http_redirect_uri_rejects_non_loopback_hosts_even_with_development_enabled(
+    base: str,
+) -> None:
+    settings = _settings(
+        downstream_oauth_redirect_base_url=base,
+        allow_insecure_endpoints=True,
+        allow_private_endpoints=True,
+    )
+
+    with pytest.raises(OAuthConfigurationError, match="must use HTTPS"):
+        callback_redirect_uri(settings)
 
 
 def test_oauth_endpoints_reject_query_fragments_and_private_addresses(

@@ -119,7 +119,17 @@
   heuristic; RFC 8414 discovery and RFC 8707 resource indicators are not
   implemented; key rotation is by version map with no re-seal command; and
   PostgreSQL concurrency, migration, and browser acceptance tests are deferred.
-  Icons are local monograms only.
+  Icons are local monograms only. Final design alignment standardizes new
+  deployment configuration on `COYOTE_` downstream setting names (with legacy
+  aliases accepted), requires both `server:update` and the relevant
+  `credential:create` or `credential:revoke` permission for authentication
+  configuration writes, and permits `connection:manage_own` through direct or
+  verified-group collection grants. Browser-session instance administrators may
+  manage only their own connections in enabled organizations; PATs do not gain
+  that exception.
+  Local OAuth development permits an HTTP callback only for loopback origins
+  when both development mode and `ALLOW_INSECURE_ENDPOINTS=true` are set; all
+  non-loopback callbacks remain HTTPS-only.
 - **Console CSRF lifecycle:** Console and API mutations use a token derived with
   HMAC-SHA256 from the browser session's stored secret hash, a `csrf_epoch`
   counter (migration `0018`), and the session secret key. Rendering reuses the

@@ -13,6 +13,7 @@ from coyote_mcp.auth import (
     AuthenticatedPrincipal,
     authenticate_browser_session,
     issue_browser_session,
+    self_service_action_allowed,
 )
 from coyote_mcp.catalog import AuthorizationError, MissingResourceError
 from coyote_mcp.connected_apps import (
@@ -33,9 +34,12 @@ from coyote_mcp.credentials import DownstreamCredentialBroker, open_client_secre
 from coyote_mcp.downstream_errors import DownstreamAuthorizationError
 from coyote_mcp.downstream_oauth import OAuthProtocolError, TokenSet, code_challenge_for, hash_state
 from coyote_mcp.models import (
+    Collection,
     DownstreamConnection,
     DownstreamOAuthIntegration,
     DownstreamOAuthTransaction,
+    ExternalGroup,
+    GroupRoleMapping,
     InstanceAdministrator,
     MCPServer,
     Organization,
@@ -668,10 +672,21 @@ async def test_connections_require_a_human_browser_member(
         with pytest.raises(AuthorizationError):
             await start_connection(session, settings, service_current, server.id)
     async with session_factory() as session:
+        authorization_url = await start_connection(
+            session, settings, await _current(session, outsider_cookie), server.id
+        )
+    assert authorization_url.startswith("https://github.com/login/oauth/authorize?")
+
+    instance_admin_pat = AuthenticatedPrincipal(
+        principal=outsider,
+        scopes=frozenset({"connection:manage_own"}),
+        token=None,
+        organization_id=organization.id,
+        credential_context="pat",
+    )
+    async with session_factory() as session:
         with pytest.raises(AuthorizationError):
-            await start_connection(
-                session, settings, await _current(session, outsider_cookie), server.id
-            )
+            await start_connection(session, settings, instance_admin_pat, server.id)
 
 
 @pytest.mark.asyncio
@@ -716,6 +731,128 @@ async def test_members_cannot_change_administrator_configuration(
         current = await _current(session, cookie)
         with pytest.raises(AuthorizationError):
             await set_shared_credential(session, settings, current, server.id, "shared-value")
+
+
+@pytest.mark.asyncio
+async def test_sensitive_configuration_writes_require_server_and_credential_permissions(
+    session_factory: async_sessionmaker[AsyncSession], public_dns: None
+) -> None:
+    settings = _settings()
+    organization = await _organization(session_factory)
+    administrator = await _member(session_factory, organization, "owner")
+    server = await _server(session_factory, organization, policy="none")
+
+    server_only = AuthenticatedPrincipal(
+        principal=administrator,
+        scopes=frozenset({"server:update"}),
+        token=None,
+        organization_id=organization.id,
+    )
+    credential_only = AuthenticatedPrincipal(
+        principal=administrator,
+        scopes=frozenset({"credential:create"}),
+        token=None,
+        organization_id=organization.id,
+    )
+    create_without_revoke = AuthenticatedPrincipal(
+        principal=administrator,
+        scopes=frozenset({"server:update", "credential:create"}),
+        token=None,
+        organization_id=organization.id,
+    )
+
+    async with session_factory() as session:
+        with pytest.raises(AuthorizationError):
+            await set_auth_policy(session, server_only, server.id, "shared_bearer")
+        with pytest.raises(AuthorizationError):
+            await save_integration(session, settings, server_only, server.id, _github_input())
+        with pytest.raises(AuthorizationError):
+            await set_integration_enabled(session, settings, server_only, server.id, True)
+        with pytest.raises(AuthorizationError):
+            await set_shared_credential(session, settings, server_only, server.id, "shared-value")
+        with pytest.raises(AuthorizationError):
+            await clear_shared_credential(session, create_without_revoke, server.id)
+        with pytest.raises(AuthorizationError):
+            await set_auth_policy(session, credential_only, server.id, "shared_bearer")
+
+
+@pytest.mark.asyncio
+async def test_self_service_connection_permission_allows_collection_and_group_grants_only_in_org(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    organization = await _organization(session_factory)
+    other_organization = await _organization(session_factory)
+    async with session_factory() as session:
+        direct_principal = Principal(
+            identifier=f"apps-user-{uuid4().hex}",
+            display_name="Direct scoped member",
+            identity_type="human",
+        )
+        group_principal = Principal(
+            identifier=f"apps-user-{uuid4().hex}",
+            display_name="Group scoped member",
+            identity_type="human",
+        )
+        collection = Collection(
+            organization_id=organization.id,
+            slug=f"scoped-{uuid4().hex[:8]}",
+            display_name="Scoped",
+        )
+        group = ExternalGroup(
+            organization_id=organization.id,
+            external_id="connected-apps-group",
+            display_name="Connected Apps",
+        )
+        session.add_all([direct_principal, group_principal, collection, group])
+        await session.flush()
+        session.add_all(
+            [
+                OrganizationMembership(
+                    organization_id=organization.id, principal_id=direct_principal.id
+                ),
+                OrganizationMembership(
+                    organization_id=organization.id, principal_id=group_principal.id
+                ),
+            ]
+        )
+        session.add(
+            RoleAssignment(
+                organization_id=organization.id,
+                principal_id=direct_principal.id,
+                role="viewer",
+                collection_id=collection.id,
+            )
+        )
+        session.add(
+            GroupRoleMapping(
+                organization_id=organization.id,
+                external_group_id=group.id,
+                role="viewer",
+                collection_id=collection.id,
+            )
+        )
+        await session.commit()
+
+        assert await self_service_action_allowed(
+            session, direct_principal, organization.id, "connection:manage_own"
+        )
+        assert await self_service_action_allowed(
+            session,
+            group_principal,
+            organization.id,
+            "connection:manage_own",
+            frozenset({"connected-apps-group"}),
+        )
+        assert not await self_service_action_allowed(
+            session,
+            group_principal,
+            organization.id,
+            "connection:manage_own",
+            frozenset({"other-group"}),
+        )
+        assert not await self_service_action_allowed(
+            session, group_principal, other_organization.id, "connection:manage_own"
+        )
 
 
 @pytest.mark.asyncio
