@@ -3,6 +3,7 @@ import os
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import httpx
 import pytest
 from pydantic import SecretStr
 from sqlalchemy import select
@@ -27,10 +28,14 @@ from coyote_mcp.downstream_oauth import (
     TokenSet,
     callback_redirect_uri,
     code_challenge_for,
+    exchange_authorization_code,
+    fetch_account_identifier,
     generate_code_verifier,
     generate_state,
     hash_state,
     parse_scopes,
+    refresh_tokens,
+    revoke_token,
     validate_oauth_endpoint,
 )
 from coyote_mcp.models import (
@@ -234,6 +239,13 @@ def test_oauth_endpoints_reject_query_fragments_and_private_addresses(
         validate_oauth_endpoint("https://github.com/token#fragment", settings)
     with pytest.raises(OAuthConfigurationError):
         validate_oauth_endpoint("https://internal.example.test/token", settings)
+    with pytest.raises(OAuthConfigurationError, match="must use HTTPS"):
+        validate_oauth_endpoint(
+            "http://provider.example.test/token",
+            settings.model_copy(
+                update={"allow_insecure_endpoints": True, "allow_private_endpoints": True}
+            ),
+        )
 
 
 def test_scope_parsing_accepts_space_or_comma_separated_text() -> None:
@@ -255,6 +267,182 @@ def test_protocol_error_carries_only_oauth_code() -> None:
 
     assert error.code == "invalid_grant"
     assert "invalid_grant" not in str(error)
+
+
+class _OAuthHttpClient:
+    def __init__(self, responses: list[httpx.Response], calls: list[dict[str, object]]) -> None:
+        self._responses = responses
+        self._calls = calls
+
+    async def __aenter__(self) -> _OAuthHttpClient:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+    async def post(self, url: str, **kwargs: object) -> httpx.Response:
+        self._calls.append({"method": "POST", "url": url, **kwargs})
+        return self._responses.pop(0)
+
+    async def get(self, url: str, **kwargs: object) -> httpx.Response:
+        self._calls.append({"method": "GET", "url": url, **kwargs})
+        return self._responses.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_oauth_protocol_helpers_send_expected_forms_and_parse_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _public_dns(monkeypatch)
+    calls: list[dict[str, object]] = []
+    request = httpx.Request("POST", "https://github.com/login/oauth/access_token")
+    responses = [
+        httpx.Response(
+            200,
+            json={
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "expires_in": 3600,
+                "scope": "repo read:user",
+            },
+            request=request,
+        ),
+        httpx.Response(200, json={"access_token": "new-access"}, request=request),
+        httpx.Response(200, content=b"", request=request),
+        httpx.Response(200, json={"login": "octocat"}, request=request),
+    ]
+    monkeypatch.setattr(
+        "coyote_mcp.downstream_oauth.httpx.AsyncClient",
+        lambda **kwargs: _OAuthHttpClient(responses, calls),
+    )
+    settings = _settings()
+
+    exchanged = await exchange_authorization_code(
+        settings,
+        token_endpoint=str(request.url),
+        client_id="client",
+        client_secret="secret",
+        code="code",
+        redirect_uri="https://coyote.example.test/console/connected-apps/callback",
+        code_verifier="verifier",
+    )
+    refreshed = await refresh_tokens(
+        settings,
+        token_endpoint=str(request.url),
+        client_id="client",
+        client_secret=None,
+        refresh_token="refresh",
+    )
+    await revoke_token(
+        settings,
+        revocation_endpoint=str(request.url),
+        client_id="client",
+        client_secret="secret",
+        token="refresh",
+    )
+    account = await fetch_account_identifier(
+        settings, account_endpoint="https://api.github.com/user", access_token="access"
+    )
+
+    assert exchanged.refresh_token == "refresh"
+    assert exchanged.scopes == ("read:user", "repo")
+    assert refreshed.access_token == "new-access"
+    assert account == "octocat"
+    assert calls[0]["data"] == {
+        "grant_type": "authorization_code",
+        "code": "code",
+        "redirect_uri": "https://coyote.example.test/console/connected-apps/callback",
+        "client_id": "client",
+        "code_verifier": "verifier",
+        "client_secret": "secret",
+    }
+    assert calls[1]["data"] == {
+        "grant_type": "refresh_token",
+        "refresh_token": "refresh",
+        "client_id": "client",
+    }
+    assert calls[2]["data"] == {
+        "token": "refresh",
+        "client_id": "client",
+        "client_secret": "secret",
+    }
+    assert calls[3]["headers"] == {"Accept": "application/json", "Authorization": "Bearer access"}
+
+
+@pytest.mark.asyncio
+async def test_oauth_protocol_helpers_sanitize_transport_and_malformed_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _public_dns(monkeypatch)
+    request = httpx.Request("POST", "https://github.com/login/oauth/access_token")
+    responses = [
+        httpx.Response(200, json={"error": "invalid_grant"}, request=request),
+        httpx.Response(500, json={}, request=request),
+        httpx.Response(200, content=b"not-json", request=request),
+        httpx.Response(200, json={"id": 42}, request=request),
+    ]
+    monkeypatch.setattr(
+        "coyote_mcp.downstream_oauth.httpx.AsyncClient",
+        lambda **kwargs: _OAuthHttpClient(responses, []),
+    )
+    settings = _settings()
+
+    with pytest.raises(OAuthProtocolError) as rejected:
+        await refresh_tokens(
+            settings,
+            token_endpoint=str(request.url),
+            client_id="client",
+            client_secret=None,
+            refresh_token="x",
+        )
+    assert rejected.value.code == "invalid_grant"
+    with pytest.raises(OAuthProtocolError):
+        await revoke_token(
+            settings,
+            revocation_endpoint=str(request.url),
+            client_id="client",
+            client_secret=None,
+            token="x",
+        )
+    with pytest.raises(OAuthProtocolError):
+        await exchange_authorization_code(
+            settings,
+            token_endpoint=str(request.url),
+            client_id="client",
+            client_secret=None,
+            code="code",
+            redirect_uri="https://coyote.example.test/console/connected-apps/callback",
+            code_verifier="verifier",
+        )
+    assert (
+        await fetch_account_identifier(
+            settings, account_endpoint="https://api.github.com/user", access_token="access"
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_revocation_rejects_http_error_even_with_oauth_error_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _public_dns(monkeypatch)
+    request = httpx.Request("POST", "https://github.com/login/oauth/access_token")
+    monkeypatch.setattr(
+        "coyote_mcp.downstream_oauth.httpx.AsyncClient",
+        lambda **kwargs: _OAuthHttpClient(
+            [httpx.Response(400, json={"error": "invalid_token"}, request=request)], []
+        ),
+    )
+
+    with pytest.raises(OAuthProtocolError, match="Token revocation failed"):
+        await revoke_token(
+            _settings(),
+            revocation_endpoint=str(request.url),
+            client_id="client",
+            client_secret=None,
+            token="token",
+        )
 
 
 # --- Credential broker ----------------------------------------------------------------

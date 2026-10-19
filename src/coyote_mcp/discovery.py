@@ -181,7 +181,11 @@ class FastMCPDiscoveryClient:
 
 
 async def reconcile_tools(
-    session: AsyncSession, server: MCPServer, discovered_tools: Sequence[DiscoveredTool]
+    session: AsyncSession,
+    server: MCPServer,
+    discovered_tools: Sequence[DiscoveredTool],
+    *,
+    deactivate_missing: bool = True,
 ) -> None:
     now = datetime.now(UTC)
     existing = {
@@ -217,11 +221,12 @@ async def reconcile_tools(
         tool.active = True
         tool.last_seen_at = now
 
-    await session.execute(
-        update(Tool)
-        .where(Tool.server_id == server.id, Tool.name.not_in(discovered_names))
-        .values(active=False)
-    )
+    if deactivate_missing:
+        await session.execute(
+            update(Tool)
+            .where(Tool.server_id == server.id, Tool.name.not_in(discovered_names))
+            .values(active=False)
+        )
 
 
 class DiscoveryService:
@@ -234,12 +239,14 @@ class DiscoveryService:
         session: AsyncSession,
         server: MCPServer,
         headers_provider: DiscoveryHeadersProvider | None = None,
+        deactivate_missing: bool = True,
     ) -> MCPServer:
         """Refresh the catalog for ``server``.
 
         ``headers_provider`` supplies the downstream credential for the discovery request.
         If it fails, the sync is marked as an error and the last-known catalog is kept.
         """
+        headers = await headers_provider() if headers_provider is not None else None
         locked_server = await session.scalar(
             select(MCPServer)
             .where(MCPServer.id == server.id)
@@ -255,7 +262,6 @@ class DiscoveryService:
         await session.commit()
 
         try:
-            headers = await headers_provider() if headers_provider is not None else None
             discovered_tools = await self._client.list_tools(endpoint, headers=headers)
         except Exception as error:
             failure_message = (
@@ -288,7 +294,9 @@ class DiscoveryService:
         if locked_server.sync_generation != generation:
             await session.rollback()
             raise SyncSupersededError("A newer synchronization is in progress.")
-        await reconcile_tools(session, locked_server, discovered_tools)
+        await reconcile_tools(
+            session, locked_server, discovered_tools, deactivate_missing=deactivate_missing
+        )
         locked_server.status = "ready"
         locked_server.last_synced_at = datetime.now(UTC)
         locked_server.last_sync_error = None

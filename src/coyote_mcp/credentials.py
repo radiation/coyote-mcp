@@ -60,6 +60,7 @@ class DownstreamAuthorization:
     policy: str
     headers: Mapping[str, str] = field(default_factory=dict, repr=False)
     connection_id: UUID | None = None
+    credential_revision: int | None = None
 
 
 @asynccontextmanager
@@ -180,7 +181,11 @@ class DownstreamCredentialBroker:
         Shared and unauthenticated policies have no per-user state to update. Other
         upstream statuses are reported to the caller without changing stored state.
         """
-        if status_code != 401 or authorization.connection_id is None:
+        if (
+            status_code != 401
+            or authorization.connection_id is None
+            or authorization.credential_revision is None
+        ):
             return
         async with scoped_session(session) as db, db.begin():
             await db.execute(
@@ -188,6 +193,7 @@ class DownstreamCredentialBroker:
                 .where(
                     DownstreamConnection.id == authorization.connection_id,
                     DownstreamConnection.status == CONNECTION_STATUS_CONNECTED,
+                    DownstreamConnection.credential_revision == authorization.credential_revision,
                 )
                 .values(status=CONNECTION_STATUS_REAUTHORIZATION)
             )
@@ -249,18 +255,25 @@ class DownstreamCredentialBroker:
                 "This app is not available for connection.",
             )
 
-        connection_id, tokens = await self._current_tokens(session, server, current.principal.id)
+        connection_id, credential_revision, tokens = await self._current_tokens(
+            session, server, current.principal.id, integration.revision
+        )
         if tokens.is_expired():
             tokens = await self._refresh(session, connection_id, integration)
         return DownstreamAuthorization(
             policy=POLICY_PER_USER_OAUTH,
             headers={"Authorization": f"Bearer {tokens.access_token}"},
             connection_id=connection_id,
+            credential_revision=credential_revision,
         )
 
     async def _current_tokens(
-        self, session: AsyncSession, server: MCPServer, principal_id: UUID
-    ) -> tuple[UUID, TokenSet]:
+        self,
+        session: AsyncSession,
+        server: MCPServer,
+        principal_id: UUID,
+        integration_revision: int,
+    ) -> tuple[UUID, int, TokenSet]:
         async with scoped_session(session) as db:
             connection = await db.scalar(
                 select(DownstreamConnection).where(
@@ -273,7 +286,10 @@ class DownstreamCredentialBroker:
                 raise DownstreamAuthorizationError("connection_required", CONNECT_MESSAGE)
             if connection.status != CONNECTION_STATUS_CONNECTED:
                 raise DownstreamAuthorizationError("connection_required", REAUTHORIZE_MESSAGE)
+            if connection.integration_revision != integration_revision:
+                raise DownstreamAuthorizationError("connection_required", REAUTHORIZE_MESSAGE)
             connection_id = connection.id
+            credential_revision = connection.credential_revision
             tokens = _open_connection_tokens(self._settings, connection)
         if tokens.is_expired() and tokens.refresh_token is None:
             raise DownstreamAuthorizationError(
@@ -281,7 +297,7 @@ class DownstreamCredentialBroker:
                 "The connection to this app has expired. Reconnect it in My Profile > "
                 "Connected Apps.",
             )
-        return connection_id, tokens
+        return connection_id, credential_revision, tokens
 
     async def _refresh(
         self,
@@ -296,7 +312,6 @@ class DownstreamCredentialBroker:
         is raised, so a rejected refresh token is not retried on every request.
         """
         now = datetime.now(UTC)
-        reauthorize = False
         async with scoped_session(session) as db, db.begin():
             connection = await db.scalar(
                 select(DownstreamConnection)
@@ -329,7 +344,6 @@ class DownstreamCredentialBroker:
                         "The connection could not be refreshed. Try again later.",
                     ) from None
                 connection.status = CONNECTION_STATUS_REAUTHORIZATION
-                reauthorize = True
             except OAuthConfigurationError, CredentialVaultError:
                 raise DownstreamAuthorizationError(
                     "token_refresh_failed",
@@ -355,11 +369,7 @@ class DownstreamCredentialBroker:
                 connection.scopes = list(rotated.scopes)
                 connection.last_refreshed_at = now
                 return rotated
-        if reauthorize:
-            raise DownstreamAuthorizationError("connection_required", REAUTHORIZE_MESSAGE)
-        raise DownstreamAuthorizationError(
-            "token_refresh_failed", "The connection could not be refreshed. Try again later."
-        )
+        raise DownstreamAuthorizationError("connection_required", REAUTHORIZE_MESSAGE)
 
 
 def _open_connection_tokens(settings: Settings, connection: DownstreamConnection) -> TokenSet:

@@ -370,6 +370,15 @@ async def save_integration(
         integration = DownstreamOAuthIntegration(
             organization_id=organization_id, server_id=server_id
         )
+    previous = (
+        integration.provider,
+        integration.client_id,
+        integration.authorization_endpoint,
+        integration.token_endpoint,
+        integration.revocation_endpoint,
+        integration.account_endpoint,
+        tuple(integration.scopes or []),
+    )
 
     secret = data.client_secret or ""
     if secret:
@@ -394,6 +403,32 @@ async def save_integration(
     integration.revocation_endpoint = revocation_endpoint or None
     integration.account_endpoint = account_endpoint or None
     integration.scopes = list(scopes)
+    replacement = previous != (
+        integration.provider,
+        integration.client_id,
+        integration.authorization_endpoint,
+        integration.token_endpoint,
+        integration.revocation_endpoint,
+        integration.account_endpoint,
+        tuple(integration.scopes or []),
+    ) or bool(secret)
+    if not is_new and replacement:
+        integration.revision += 1
+        await session.execute(
+            delete(DownstreamOAuthTransaction).where(
+                DownstreamOAuthTransaction.organization_id == organization_id,
+                DownstreamOAuthTransaction.server_id == server_id,
+                DownstreamOAuthTransaction.consumed_at.is_(None),
+            )
+        )
+        await session.execute(
+            update(DownstreamConnection)
+            .where(
+                DownstreamConnection.organization_id == organization_id,
+                DownstreamConnection.server_id == server_id,
+            )
+            .values(status=CONNECTION_STATUS_REAUTHORIZATION)
+        )
 
     problems = _integration_problems(settings, integration)
     if data.enabled and problems:
@@ -639,6 +674,7 @@ async def start_connection(
             principal_id=current.principal.id,
             organization_id=organization_id,
             server_id=server_id,
+            integration_revision=integration.revision,
             key_version=sealed.key_version,
             sealed_verifier=sealed.sealed,
             expires_at=now + TRANSACTION_LIFETIME,
@@ -694,6 +730,7 @@ async def _store_connection(
     organization_id: UUID,
     server_id: UUID,
     principal_id: UUID,
+    integration_revision: int,
     sealed: SealedValue,
     scopes: list[str],
     account_identifier: str | None,
@@ -721,6 +758,8 @@ async def _store_connection(
                     organization_id=organization_id,
                     server_id=server_id,
                     principal_id=principal_id,
+                    integration_revision=integration_revision,
+                    credential_revision=1,
                     status=CONNECTION_STATUS_CONNECTED,
                     key_version=sealed.key_version,
                     sealed_tokens=sealed.sealed,
@@ -732,6 +771,8 @@ async def _store_connection(
             )
         else:
             connection.status = CONNECTION_STATUS_CONNECTED
+            connection.integration_revision = integration_revision
+            connection.credential_revision += 1
             connection.key_version = sealed.key_version
             connection.sealed_tokens = sealed.sealed
             connection.scopes = scopes
@@ -790,6 +831,7 @@ async def complete_connection(
             .values(consumed_at=now)
             .returning(
                 DownstreamOAuthTransaction.server_id,
+                DownstreamOAuthTransaction.integration_revision,
                 DownstreamOAuthTransaction.key_version,
                 DownstreamOAuthTransaction.sealed_verifier,
             )
@@ -799,6 +841,7 @@ async def complete_connection(
     if consumed is None:
         raise ConnectedAppError("invalid_callback", INVALID_CALLBACK_MESSAGE)
     server_id = consumed.server_id
+    integration_revision = consumed.integration_revision
     key_version = consumed.key_version
     sealed_verifier = consumed.sealed_verifier
 
@@ -819,6 +862,8 @@ async def complete_connection(
         or not integration.enabled
     ):
         raise ConnectedAppError("not_available", "This app is no longer available for connection.")
+    if integration.revision != integration_revision:
+        raise ConnectedAppError("invalid_callback", INVALID_CALLBACK_MESSAGE)
     problems = _integration_problems(settings, integration)
     if problems:
         raise ConnectedAppError("configuration_error", "; ".join(problems))
@@ -871,6 +916,7 @@ async def complete_connection(
         organization_id=organization_id,
         server_id=server_id,
         principal_id=current.principal.id,
+        integration_revision=integration.revision,
         sealed=sealed,
         scopes=list(tokens.scopes),
         account_identifier=account_identifier,

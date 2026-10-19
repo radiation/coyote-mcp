@@ -217,6 +217,27 @@ async def test_tools_with_same_name_are_isolated_by_server(
     ] == ["search"]
 
 
+@pytest.mark.asyncio
+async def test_partial_discovery_does_not_deactivate_unseen_tools_when_requested(
+    session, organization: Organization
+) -> None:
+    server = await catalog.create_server(session, organization.id, server_request("partial"))
+    await reconcile_tools(
+        session, server, [discovered_tool("alice-visible"), discovered_tool("bob-only")]
+    )
+    await session.commit()
+
+    await reconcile_tools(
+        session, server, [discovered_tool("alice-visible")], deactivate_missing=False
+    )
+    await session.commit()
+
+    assert [
+        tool.name
+        for tool in await catalog.list_server_tools(session, organization.id, server.id, 50, 0)
+    ] == ["alice-visible", "bob-only"]
+
+
 class FailingDiscoveryClient:
     async def list_tools(
         self, endpoint: str, headers: Mapping[str, str] | None = None

@@ -261,7 +261,10 @@ async def discover_server(
         return authorization.headers
 
     return await get_discovery_service(settings).sync(
-        session, server, headers_provider=headers_provider
+        session,
+        server,
+        headers_provider=headers_provider,
+        deactivate_missing=server.auth_policy != "per_user_oauth",
     )
 
 

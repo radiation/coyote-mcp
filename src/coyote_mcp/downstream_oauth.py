@@ -125,6 +125,8 @@ def _local_http_redirect_allowed(settings: Settings, hostname: str) -> bool:
 
 def validate_oauth_endpoint(endpoint: str, settings: Settings) -> None:
     parsed = urlparse(endpoint)
+    if parsed.scheme != "https":
+        raise OAuthConfigurationError("OAuth endpoints must use HTTPS.")
     if parsed.query or parsed.fragment:
         raise OAuthConfigurationError("OAuth endpoints must not include query or fragment.")
     try:
@@ -189,7 +191,12 @@ def _parse_token_payload(payload: object, now: datetime) -> TokenSet:
 
 
 async def _post_form(
-    settings: Settings, endpoint: str, data: Mapping[str, str], failure_message: str
+    settings: Settings,
+    endpoint: str,
+    data: Mapping[str, str],
+    failure_message: str,
+    *,
+    require_json: bool = True,
 ) -> Any:
     validate_oauth_endpoint(endpoint, settings)
     resolved = resolve_endpoint(endpoint, settings)
@@ -205,6 +212,10 @@ async def _post_form(
             )
         except httpx.HTTPError as error:
             raise OAuthProtocolError(failure_message) from error
+    if not require_json:
+        if response.status_code >= 400:
+            raise OAuthProtocolError(failure_message)
+        return None
     try:
         payload = response.json()
     except ValueError as error:
@@ -269,7 +280,13 @@ async def revoke_token(
     data = {"token": token, "client_id": client_id}
     if client_secret:
         data["client_secret"] = client_secret
-    await _post_form(settings, revocation_endpoint, data, "Token revocation failed.")
+    await _post_form(
+        settings,
+        revocation_endpoint,
+        data,
+        "Token revocation failed.",
+        require_json=False,
+    )
 
 
 async def fetch_account_identifier(

@@ -471,6 +471,7 @@ class DownstreamOAuthIntegration(Base):
         ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
     )
     server_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     provider: Mapped[str] = mapped_column(String(32), nullable=False)
     authorization_endpoint: Mapped[str] = mapped_column(String(2048), nullable=False)
     token_endpoint: Mapped[str] = mapped_column(String(2048), nullable=False)
@@ -516,6 +517,8 @@ class DownstreamConnection(Base):
     )
     server_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False, index=True)
     principal_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False, index=True)
+    integration_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    credential_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="connected")
     key_version: Mapped[str] = mapped_column(String(64), nullable=False)
     sealed_tokens: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
@@ -552,6 +555,7 @@ class DownstreamOAuthTransaction(Base):
         ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
     )
     server_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    integration_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     key_version: Mapped[str] = mapped_column(String(64), nullable=False)
     sealed_verifier: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(

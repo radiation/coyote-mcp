@@ -17,8 +17,11 @@ from coyote_mcp.auth import (
 )
 from coyote_mcp.catalog import AuthorizationError, MissingResourceError
 from coyote_mcp.connected_apps import (
+    MAX_SCOPES,
     ConnectedAppError,
     IntegrationInput,
+    _parse_scopes_text,
+    _validated_endpoint,
     clear_shared_credential,
     complete_connection,
     disconnect,
@@ -107,6 +110,38 @@ def _github_input(
         account_endpoint="https://api.github.com/user",
         enabled=enabled,
     )
+
+
+def test_scope_validation_normalizes_and_rejects_invalid_values() -> None:
+    assert _parse_scopes_text("repo, read:user repo") == ("repo", "read:user")
+
+    with pytest.raises(ConnectedAppError, match="Scopes may contain"):
+        _parse_scopes_text("repo invalid scope!")
+    with pytest.raises(ConnectedAppError, match="No more than"):
+        _parse_scopes_text(" ".join(f"scope-{index}" for index in range(MAX_SCOPES + 1)))
+
+
+def test_generic_endpoint_validation_requires_safe_configured_urls(
+    public_dns: None,
+) -> None:
+    settings = _settings()
+
+    assert (
+        _validated_endpoint(
+            settings, "https://provider.example.test/token", required=True, label="Token endpoint"
+        )
+        == "https://provider.example.test/token"
+    )
+    assert _validated_endpoint(settings, " ", required=False, label="Account endpoint") == ""
+    with pytest.raises(ConnectedAppError, match="Token endpoint is required"):
+        _validated_endpoint(settings, "", required=True, label="Token endpoint")
+    with pytest.raises(ConnectedAppError, match="Token endpoint"):
+        _validated_endpoint(
+            settings.model_copy(update={"allow_insecure_endpoints": False}),
+            "http://provider.example.test/token",
+            required=True,
+            label="Token endpoint",
+        )
 
 
 async def _organization(session_factory: async_sessionmaker[AsyncSession]) -> Organization:
