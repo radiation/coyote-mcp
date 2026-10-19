@@ -21,6 +21,15 @@ through settings; ID tokens and refresh tokens are not persisted. The privileged
 administrator binding; normal browser authentication always validates OIDC
 claims before it issues a session.
 
+Production ingress is a separate trust boundary. Production settings require a
+canonical HTTPS public origin, explicit allowed hosts, and explicit trusted
+proxy IP/CIDR networks. Host validation rejects unexpected `Host` headers.
+Only a direct peer in a trusted proxy network can set `X-Forwarded-Proto` or
+supply a validated `X-Request-ID`; all other client-supplied forwarded values
+are ignored. The request ID is generated when no trusted valid value exists and
+is returned in the response. Console MCP endpoint URLs use the canonical public
+origin instead of request or forwarded host input.
+
 ## Authorization and tenancy
 
 Authorization is centralized in `auth.authorize`, default-deny, and scoped to an

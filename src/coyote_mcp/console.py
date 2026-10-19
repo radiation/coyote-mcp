@@ -822,7 +822,10 @@ async def _collection_detail_response(
             active_navigation="collections",
             organization_name=await _organization_name(session, organization_id),
             collection=collection,
-            endpoint_url=(f"{str(request.base_url).rstrip('/')}/mcp/collections/{collection.slug}"),
+            endpoint_url=(
+                f"{Settings().public_origin or str(request.base_url).rstrip('/')}"
+                f"/mcp/collections/{collection.slug}"
+            ),
             memberships=memberships[:MEMBERSHIP_LIMIT],
             membership_truncated=len(memberships) > MEMBERSHIP_LIMIT,
             addable_servers=addable_servers,

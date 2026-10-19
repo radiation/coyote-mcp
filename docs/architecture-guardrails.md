@@ -68,6 +68,15 @@ that must preserve these invariants.
   by default, no credentials in URLs, redirect prevention, and destination
   pinning. OIDC endpoints must also remain on the issuer or explicitly trusted
   host boundary.
+- **Production ingress is explicit.** Production requires an explicit external
+  PostgreSQL asyncpg URL, canonical HTTPS public origin, explicit allowed-host
+  list, and trusted proxy IP/CIDR list. Broad private/insecure endpoint settings
+  and their host allowlists are development-only. Forwarded scheme and upstream
+  request IDs are accepted only from a direct trusted proxy peer; collection
+  endpoint display uses the configured canonical origin, never a forwarded host.
+- **Migrations are release-owned.** Application replicas never run Alembic on
+  startup. A singleton deployment release operation applies the additive
+  migration history before application rollout.
 - **MCP gateway operations are PAT-only, publication-gated, and authorization is current.** The
   Streamable HTTP endpoint at `/mcp` rejects absent, invalid, expired, revoked,
   and browser-session credentials. Discovery, description, and execution load

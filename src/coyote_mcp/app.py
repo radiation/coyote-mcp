@@ -14,13 +14,15 @@ from mcp.shared.exceptions import MCPError
 from mcp.types import INVALID_PARAMS, ToolAnnotations
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from coyote_mcp.api import router as api_router
 from coyote_mcp.auth import AuthenticatedPrincipal, authenticate_token
 from coyote_mcp.console import router as console_router
-from coyote_mcp.db import SessionLocal
+from coyote_mcp.db import SessionLocal, dispose_engine
 from coyote_mcp.gateway import GatewayError, GatewayService, NativeGatewayTool
 from coyote_mcp.oidc import router as oidc_router
+from coyote_mcp.runtime import RequestIDMiddleware, TrustedProxyHeadersMiddleware
 from coyote_mcp.settings import Settings
 
 
@@ -207,12 +209,28 @@ collection_mcp_app = collection_mcp.http_app(path="/{collection_slug}", transpor
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with mcp_app.lifespan(app), collection_mcp_app.lifespan(app):
-        yield
+        try:
+            yield
+        finally:
+            await dispose_engine()
 
 
 app = FastAPI(title="coyote-mcp", lifespan=lifespan)
 settings = Settings()
 app.state.mcp_session_factory = SessionLocal
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=settings.effective_allowed_hosts,
+    www_redirect=False,
+)
+app.add_middleware(
+    TrustedProxyHeadersMiddleware,
+    trusted_proxy_networks=tuple(settings.trusted_proxy_networks),
+)
+app.add_middleware(
+    RequestIDMiddleware,
+    trusted_proxy_networks=tuple(settings.trusted_proxy_networks),
+)
 app.mount("/static", StaticFiles(packages=[("coyote_mcp", "static")]), name="static")
 
 
@@ -248,7 +266,8 @@ async def authenticate_mcp_requests(
 app.mount("/mcp/collections", collection_mcp_app)
 app.mount("/mcp", mcp_app)
 app.include_router(api_router)
-app.include_router(oidc_router)
+if settings.oidc_enabled:
+    app.include_router(oidc_router)
 app.include_router(console_router)
 
 

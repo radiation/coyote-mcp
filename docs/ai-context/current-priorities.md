@@ -87,8 +87,8 @@
   collection's available and published tools. Membership is managed with the
   existing `collection:manage_members` action. Removing a server from a
   collection also removes its publications in that collection. The page shows
-  the endpoint as `/mcp/collections/{slug}` derived from the request origin, so
-  it must be checked behind a reverse proxy. Collection pages authorize each
+  the endpoint as `/mcp/collections/{slug}` using the configured canonical
+  public origin in production. Collection pages authorize each
   collection individually, so collection-scoped roles work without an
   organization-wide grant; the collection list shows only collections the
   viewer may read. Pagination filters each page after fetching it, so a
@@ -138,9 +138,22 @@
   creation increments the epoch in the same transaction as the active organization change,
   so an old form cannot pair the new organization with the previous token. New sessions
   receive new tokens. Missing, invalid, and cross-session tokens are rejected.
+- **Phase 5 P5-01 production deployment and configuration:** The portable
+  Docker image installs locked runtime dependencies, runs as a non-root
+  `coyote` user, and includes a liveness health check. Production settings fail
+  closed for the external PostgreSQL asyncpg URL, session secret, canonical
+  HTTPS origin, allowed hosts, trusted proxy networks, unsafe destination
+  exceptions, and enabled optional OIDC/credential features. The separate
+  `compose.production.yaml` has no source mounts, reload, local database, or
+  insecure downstream exceptions; it provides a singleton `release` migration
+  job and loopback-only application port. Trusted proxy middleware accepts
+  forwarding/request IDs only from configured networks, and app shutdown
+  disposes the database engine after FastMCP lifespan shutdown.
 
 ## Next
 
+- **Phase 5 P5-02:** Append-only, tenant-scoped security audit events and
+  retention contract for sensitive administrative, credential, and MCP actions.
 - **Phase 3B:** Audit events, cancellation, and operational metrics for MCP
   execution, plus downstream authentication follow-ups (provider discovery,
   additional providers, and credential re-seal tooling).

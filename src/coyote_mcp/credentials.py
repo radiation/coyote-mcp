@@ -162,9 +162,17 @@ class DownstreamCredentialBroker:
             raise DownstreamAuthorizationError("server_unavailable", "Server is not available.")
         if server.auth_policy == POLICY_NONE:
             return DownstreamAuthorization(policy=POLICY_NONE)
+        if not self._settings.downstream_credentials_available:
+            raise DownstreamAuthorizationError(
+                "credential_not_configured", "Downstream credentials are disabled."
+            )
         if server.auth_policy == POLICY_SHARED_BEARER:
             return await self._shared_bearer(session, server)
         if server.auth_policy == POLICY_PER_USER_OAUTH:
+            if not self._settings.downstream_oauth_available:
+                raise DownstreamAuthorizationError(
+                    "connection_required", "Downstream OAuth is disabled."
+                )
             return await self._per_user_oauth(session, current, server)
         raise DownstreamAuthorizationError(
             "authorization_not_configured", "Server authentication policy is not supported."

@@ -630,6 +630,8 @@ async def start_connection(
         raise ConnectedAppError(
             "browser_session_required", "Connections can only be started from a browser session."
         )
+    if not settings.downstream_oauth_available:
+        raise ConnectedAppError("not_available", "Downstream OAuth is disabled.")
     server = await get_server(session, organization_id, server_id)
     integration = await _integration_for(session, organization_id, server_id)
     if (
@@ -810,6 +812,8 @@ async def complete_connection(
         raise ConnectedAppError(
             "browser_session_required", "Connections can only be completed from a browser session."
         )
+    if not settings.downstream_oauth_available:
+        raise ConnectedAppError("not_available", "Downstream OAuth is disabled.")
     if not state:
         raise ConnectedAppError("invalid_callback", INVALID_CALLBACK_MESSAGE)
 

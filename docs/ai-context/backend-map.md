@@ -20,7 +20,7 @@
 | `security.py` | Destination, public-address, scheme, and OIDC trust-boundary validation. |
 | `models.py` | SQLAlchemy persistence model and tenant-scoped constraints. |
 | `schemas.py` | Pydantic API request/response contracts. |
-| `db.py`, `settings.py` | Async database session factory and environment-only OIDC configuration rules. |
+| `db.py`, `settings.py`, `runtime.py` | Async database session factory and shutdown disposal; development-compatible but fail-closed production settings; trusted-proxy forwarding, host validation, canonical public origin, and request correlation. |
 | `cli.py` | Operator-only trusted issuer/subject binding for instance-administrator bootstrap and recovery; it never issues a PAT or browser session. |
 | `scripts/mock_mcp_server.py` | Compose-profile-only FastMCP mock exposing deterministic echo, addition, and failure tools. |
 | `scripts/smoke_mcp.py` | Live local smoke runner: temporary tenant bootstrap/cleanup plus REST and authenticated MCP workflow validation. |
@@ -56,6 +56,11 @@
    cover instance-admin department creation, server registration, edit, enable,
    disable, discovery refresh, and removal, collection create/edit/enable and
    membership changes, and tool publication create, edit, and unpublish.
+6. Production ingress validates the `Host` header, accepts forwarded scheme and
+   upstream request IDs only when the direct peer is an allowlisted proxy
+   network, generates a request ID otherwise, and returns it as
+   `X-Request-ID`. Console collection endpoint display uses the configured
+   public origin rather than request-derived host data.
 
 ## Extension points
 

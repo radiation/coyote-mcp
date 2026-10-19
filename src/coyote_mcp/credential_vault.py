@@ -51,6 +51,8 @@ def _key(settings: Settings, key_version: str) -> bytes:
 
 
 def active_key_version(settings: Settings) -> str:
+    if not settings.downstream_credentials_available:
+        raise CredentialVaultError("Downstream credentials are disabled.")
     version = settings.credential_active_key_version
     if not version:
         raise CredentialVaultError("No active credential encryption key version is configured.")

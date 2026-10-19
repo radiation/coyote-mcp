@@ -1274,6 +1274,22 @@ async def test_collections_are_organization_scoped_and_show_endpoint(
 
 
 @pytest.mark.asyncio
+async def test_collection_endpoint_uses_configured_public_origin(
+    session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COYOTE_PUBLIC_BASE_URL", "https://gateway.example.test")
+    cookie, organization, _ = await _browser_session(session_factory, role="viewer")
+    collection_id = await _create_collection(session_factory, organization.id, "public-collection")
+
+    async with _console_client(session_factory, cookie) as client:
+        detail = await client.get(f"/console/collections/{collection_id}")
+
+    assert detail.status_code == 200
+    assert "https://gateway.example.test/mcp/collections/public-collection" in detail.text
+    assert "http://test/mcp/collections/public-collection" not in detail.text
+
+
+@pytest.mark.asyncio
 async def test_instance_admin_reads_collections_without_membership_role(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

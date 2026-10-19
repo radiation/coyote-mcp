@@ -33,6 +33,15 @@ Visit `http://localhost:8000/healthz`. MCP is mounted at `/mcp/`.
 Alembic configuration is in the repository-root `alembic.ini`; the environment
 and revision scripts are under `alembic/` and `alembic/versions/`.
 
+## Production deployment
+
+The development Compose workflow is not a production deployment. Production
+uses the non-root Docker artifact with external PostgreSQL 17+, TLS terminated
+by a trusted reverse proxy, environment/secret injection, and a separately run
+singleton Alembic release job. See [Production deployment](docs/operations/production-deployment.md)
+and [compose.production.yaml](compose.production.yaml) for the configuration,
+proxy, migration, rollback, and image-runtime contract.
+
 ## Phase 2A authentication and authorization
 
 Phase 2A introduces one configured organization boundary. The `0004` migration
