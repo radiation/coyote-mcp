@@ -17,6 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import FormData
 
 from coyote_mcp import catalog, connected_apps
+from coyote_mcp.audit import (
+    AuditAction,
+    AuditActorType,
+    AuditTargetType,
+    record_independent_denial_event,
+)
 from coyote_mcp.auth import (
     AuthenticatedPrincipal,
     OrganizationBootstrapError,
@@ -86,6 +92,20 @@ async def _authorized(session: AsyncSession, current: AuthenticatedPrincipal, ac
         verified_group_ids=current.verified_group_ids,
         credential_context=current.credential_context,
     )
+    if not decision.allowed:
+        await record_independent_denial_event(
+            session,
+            organization_id=current.require_organization_id(),
+            action=AuditAction.AUTHORIZATION_DENIED,
+            target_type=AuditTargetType.AUTHORIZATION,
+            metadata={"action": action, "reason_code": decision.reason},
+            actor_type=(
+                AuditActorType.SERVICE
+                if current.principal.identity_type == "service"
+                else AuditActorType.HUMAN
+            ),
+            actor_id=current.principal.id,
+        )
     return decision.allowed
 
 
@@ -822,7 +842,10 @@ async def _collection_detail_response(
             active_navigation="collections",
             organization_name=await _organization_name(session, organization_id),
             collection=collection,
-            endpoint_url=(f"{str(request.base_url).rstrip('/')}/mcp/collections/{collection.slug}"),
+            endpoint_url=(
+                f"{Settings().public_origin or str(request.base_url).rstrip('/')}"
+                f"/mcp/collections/{collection.slug}"
+            ),
             memberships=memberships[:MEMBERSHIP_LIMIT],
             membership_truncated=len(memberships) > MEMBERSHIP_LIMIT,
             addable_servers=addable_servers,

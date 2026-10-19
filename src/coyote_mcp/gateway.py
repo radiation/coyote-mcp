@@ -7,6 +7,7 @@ import multiprocessing
 import resource
 import signal
 import sys
+import time
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from multiprocessing.connection import Connection
@@ -27,6 +28,14 @@ from referencing.exceptions import Unresolvable
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coyote_mcp.audit import (
+    AuditAction,
+    AuditActorType,
+    AuditOutcome,
+    AuditTargetType,
+    record_independent_audit_event,
+    record_independent_denial_event,
+)
 from coyote_mcp.auth import AuthenticatedPrincipal, authorized_collection_ids
 from coyote_mcp.credentials import (
     POLICY_PER_USER_OAUTH,
@@ -53,6 +62,14 @@ _SCHEMA_VALIDATION_MEMORY_LIMIT_BYTES = 256 * 1024 * 1024
 _LIKE_ESCAPE = "\\"
 logger = logging.getLogger(__name__)
 _LOCAL_SCHEMA_REGISTRY = Registry()
+_EXECUTION_SUCCESS = "success"
+_EXECUTION_AUTHORIZATION_DENIED = "authorization_denied"
+_EXECUTION_INVALID_INPUT = "invalid_input"
+_EXECUTION_DOWNSTREAM_AUTHENTICATION_FAILURE = "downstream_authentication_failure"
+_EXECUTION_DOWNSTREAM_TIMEOUT = "downstream_timeout"
+_EXECUTION_DOWNSTREAM_TRANSPORT_FAILURE = "downstream_transport_failure"
+_EXECUTION_INVALID_DOWNSTREAM_RESPONSE = "invalid_downstream_response"
+_EXECUTION_INTERNAL_FAILURE = "internal_failure"
 
 
 @dataclass(frozen=True)
@@ -141,6 +158,10 @@ def _run_schema_validation(
 
 
 class GatewayError(RuntimeError):
+    pass
+
+
+class _ExecutionSnapshotInternalError(GatewayError):
     pass
 
 
@@ -359,14 +380,100 @@ class GatewayService:
         arguments: dict[str, Any],
         collection_slug: str | None,
     ) -> dict[str, Any]:
-        tool_name, server, input_schema, refreshed_current = await self._execution_snapshot(
-            session,
-            current,
-            tool_id,
-            collection_slug,
-        )
-        await self._validate_arguments(input_schema, arguments)
-        authorization = await self._downstream_authorization(session, refreshed_current, server)
+        started_at = time.perf_counter()
+        server_id: UUID | None = None
+        try:
+            tool_name, server, input_schema, refreshed_current = await self._execution_snapshot(
+                session,
+                current,
+                tool_id,
+                collection_slug,
+            )
+            server_id = server.id
+        except _ExecutionSnapshotInternalError:
+            await self._record_execution_event(
+                session,
+                current,
+                tool_id,
+                server_id,
+                AuditOutcome.FAILURE,
+                _EXECUTION_INTERNAL_FAILURE,
+                started_at,
+            )
+            raise
+        except GatewayError:
+            await self._record_execution_event(
+                session,
+                current,
+                tool_id,
+                server_id,
+                AuditOutcome.DENIED,
+                _EXECUTION_AUTHORIZATION_DENIED,
+                started_at,
+            )
+            raise
+        except Exception:
+            logger.error("Unexpected MCP execution authorization failure for tool %s", tool_id)
+            await self._record_execution_event(
+                session,
+                current,
+                tool_id,
+                server_id,
+                AuditOutcome.FAILURE,
+                _EXECUTION_INTERNAL_FAILURE,
+                started_at,
+            )
+            raise
+        try:
+            await self._validate_arguments(input_schema, arguments)
+        except GatewayError:
+            await self._record_execution_event(
+                session,
+                refreshed_current,
+                tool_id,
+                server_id,
+                AuditOutcome.FAILURE,
+                _EXECUTION_INVALID_INPUT,
+                started_at,
+            )
+            raise
+        except Exception:
+            logger.error("Unexpected MCP schema validation failure for tool %s", tool_id)
+            await self._record_execution_event(
+                session,
+                refreshed_current,
+                tool_id,
+                server_id,
+                AuditOutcome.FAILURE,
+                _EXECUTION_INTERNAL_FAILURE,
+                started_at,
+            )
+            raise
+        try:
+            authorization = await self._downstream_authorization(session, refreshed_current, server)
+        except GatewayError:
+            await self._record_execution_event(
+                session,
+                refreshed_current,
+                tool_id,
+                server_id,
+                AuditOutcome.FAILURE,
+                _EXECUTION_DOWNSTREAM_AUTHENTICATION_FAILURE,
+                started_at,
+            )
+            raise
+        except Exception:
+            logger.error("Unexpected MCP credential selection failure for tool %s", tool_id)
+            await self._record_execution_event(
+                session,
+                refreshed_current,
+                tool_id,
+                server_id,
+                AuditOutcome.FAILURE,
+                _EXECUTION_INTERNAL_FAILURE,
+                started_at,
+            )
+            raise
         # Each execution gets its own transport and HTTP client so that credentials cannot
         # be reused by another principal through pooled connections.
         headers = dict(authorization.headers) or None
@@ -399,14 +506,108 @@ class GatewayService:
                 await DownstreamCredentialBroker(self._settings).record_rejection(
                     session, authorization, status_code
                 )
+                await self._record_execution_event(
+                    session,
+                    refreshed_current,
+                    tool_id,
+                    server_id,
+                    AuditOutcome.FAILURE,
+                    _EXECUTION_DOWNSTREAM_AUTHENTICATION_FAILURE,
+                    started_at,
+                )
                 raise GatewayError(_rejection_error(authorization, status_code)) from None
+            execution_code = self._execution_failure_code(error)
+            await self._record_execution_event(
+                session,
+                refreshed_current,
+                tool_id,
+                server_id,
+                AuditOutcome.FAILURE,
+                execution_code,
+                started_at,
+            )
             raise self._execution_error(error, tool_id) from error
-        payload = jsonable_encoder(asdict(result))
-        if len(json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode()) > (
-            self._settings.max_execution_result_bytes
-        ):
+        try:
+            payload = jsonable_encoder(asdict(result))
+            response_size = len(
+                json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode()
+            )
+        except TypeError, ValueError:
+            await self._record_execution_event(
+                session,
+                refreshed_current,
+                tool_id,
+                server_id,
+                AuditOutcome.FAILURE,
+                _EXECUTION_INVALID_DOWNSTREAM_RESPONSE,
+                started_at,
+            )
+            raise GatewayError("Downstream tool response was invalid.") from None
+        if response_size > self._settings.max_execution_result_bytes:
+            await self._record_execution_event(
+                session,
+                refreshed_current,
+                tool_id,
+                server_id,
+                AuditOutcome.FAILURE,
+                _EXECUTION_INVALID_DOWNSTREAM_RESPONSE,
+                started_at,
+            )
             raise GatewayError("Downstream tool result exceeded the configured size limit.")
+        await self._record_execution_event(
+            session,
+            refreshed_current,
+            tool_id,
+            server_id,
+            AuditOutcome.SUCCESS,
+            _EXECUTION_SUCCESS,
+            started_at,
+        )
         return cast(dict[str, Any], payload)
+
+    async def _record_execution_event(
+        self,
+        session: AsyncSession,
+        current: AuthenticatedPrincipal,
+        tool_id: UUID,
+        server_id: UUID | None,
+        outcome: AuditOutcome,
+        execution_code: str,
+        started_at: float,
+    ) -> None:
+        metadata: dict[str, str | int] = {
+            "execution_code": execution_code,
+            "duration_ms": int((time.perf_counter() - started_at) * 1_000),
+        }
+        if server_id is not None:
+            metadata["server_id"] = str(server_id)
+        await record_independent_audit_event(
+            session,
+            organization_id=current.require_organization_id(),
+            actor_type=(
+                AuditActorType.SERVICE
+                if current.principal.identity_type == "service"
+                else AuditActorType.HUMAN
+            ),
+            actor_id=current.principal.id,
+            action=AuditAction.MCP_EXECUTION,
+            target_type=AuditTargetType.MCP_TOOL,
+            target_id=tool_id,
+            outcome=outcome,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _execution_failure_code(error: Exception) -> str:
+        if isinstance(error, TimeoutError | httpx.TimeoutException | httpx2.TimeoutException):
+            return _EXECUTION_DOWNSTREAM_TIMEOUT
+        if isinstance(error, MCPError) and error.code == REQUEST_TIMEOUT:
+            return _EXECUTION_DOWNSTREAM_TIMEOUT
+        if isinstance(error, FastMCPError | MCPError):
+            return _EXECUTION_INVALID_DOWNSTREAM_RESPONSE
+        if isinstance(error, RuntimeError | httpx.HTTPError | httpx2.HTTPError):
+            return _EXECUTION_DOWNSTREAM_TRANSPORT_FAILURE
+        return _EXECUTION_INTERNAL_FAILURE
 
     def _execution_error(self, error: Exception, tool_id: UUID) -> GatewayError:
         if isinstance(error, TimeoutError | httpx.TimeoutException | httpx2.TimeoutException):
@@ -441,7 +642,7 @@ class GatewayService:
         collection_slug: str | None,
     ) -> tuple[str, MCPServer, dict[str, Any], AuthenticatedPrincipal]:
         if session.bind is None:
-            raise GatewayError("Gateway database session is not bound.")
+            raise _ExecutionSnapshotInternalError("Gateway database session is not bound.")
         async with AsyncSession(bind=session.bind, expire_on_commit=False) as read_session:
             refreshed_current = await self._refresh_current(read_session, current)
             tool, server, _, _ = await self._authorized_tool(
@@ -496,6 +697,22 @@ class GatewayService:
             action_ids = {collection.id for collection in collections}
             authorized_ids = action_ids if authorized_ids is None else authorized_ids & action_ids
         if not authorized_ids:
+            await record_independent_denial_event(
+                session,
+                organization_id=current.require_organization_id(),
+                action=AuditAction.AUTHORIZATION_DENIED,
+                target_type=AuditTargetType.AUTHORIZATION,
+                metadata={
+                    "action": sorted(required_actions)[0],
+                    "reason_code": "collection_access_denied",
+                },
+                actor_type=(
+                    AuditActorType.SERVICE
+                    if current.principal.identity_type == "service"
+                    else AuditActorType.HUMAN
+                ),
+                actor_id=current.principal.id,
+            )
             raise GatewayError("Collection endpoint is not available.")
         collection = next(
             (

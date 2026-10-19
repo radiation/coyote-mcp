@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coyote_mcp.audit import AuditAction, AuditTargetType, record_principal_audit_event
 from coyote_mcp.auth import AuthenticatedPrincipal, authorize
 from coyote_mcp.credentials import DownstreamCredentialBroker
 from coyote_mcp.discovery import get_discovery_service
@@ -45,7 +46,11 @@ class ServerInUseError(ValueError):
 
 
 async def create_server(
-    session: AsyncSession, organization_id: UUID, request: ServerCreate
+    session: AsyncSession,
+    organization_id: UUID,
+    request: ServerCreate,
+    *,
+    actor: AuthenticatedPrincipal | None = None,
 ) -> MCPServer:
     server = MCPServer(
         organization_id=organization_id,
@@ -59,6 +64,16 @@ async def create_server(
             session.add(server)
     except IntegrityError as error:
         raise DuplicateResourceError("A server with that name already exists.") from error
+    if actor is not None:
+        await record_principal_audit_event(
+            session,
+            organization_id=organization_id,
+            actor=actor.principal,
+            action=AuditAction.SERVER_CREATED,
+            target_type=AuditTargetType.SERVER,
+            target_id=server.id,
+            metadata={"server_name": server.name, "transport": server.transport},
+        )
     await session.commit()
     await session.refresh(server)
     return server
@@ -167,7 +182,7 @@ async def register_server(
 ) -> MCPServer:
     await _authorize_organization_action(session, current, "server:create")
     validate_endpoint(str(request.endpoint), Settings())
-    return await create_server(session, current.require_organization_id(), request)
+    return await create_server(session, current.require_organization_id(), request, actor=current)
 
 
 async def require_server_update(
@@ -185,14 +200,27 @@ async def update_server(
         endpoint = str(request.endpoint)
         validate_endpoint(endpoint, Settings())
     locked_server = await _lock_server(session, current.require_organization_id(), server_id)
-    if request.display_name is not None:
+    changed_fields: list[str] = []
+    if request.display_name is not None and request.display_name != locked_server.display_name:
         locked_server.display_name = request.display_name
+        changed_fields.append("display_name")
     if endpoint is not None and endpoint != locked_server.endpoint:
         locked_server.endpoint = endpoint
         locked_server.status = "pending"
         locked_server.last_sync_error = None
         # Invalidates any in-flight discovery that targeted the previous endpoint.
         locked_server.sync_generation += 1
+        changed_fields.append("endpoint")
+    if changed_fields:
+        await record_principal_audit_event(
+            session,
+            organization_id=locked_server.organization_id,
+            actor=current.principal,
+            action=AuditAction.SERVER_UPDATED,
+            target_type=AuditTargetType.SERVER,
+            target_id=locked_server.id,
+            metadata={"changed_fields": ",".join(changed_fields)},
+        )
     await session.commit()
     await session.refresh(locked_server)
     return locked_server
@@ -202,7 +230,16 @@ async def set_server_enabled(
     session: AsyncSession, current: AuthenticatedPrincipal, server_id: UUID, enabled: bool
 ) -> MCPServer:
     server = await _authorized_server(session, current, "server:update", server_id)
-    server.enabled = enabled
+    if server.enabled != enabled:
+        server.enabled = enabled
+        await record_principal_audit_event(
+            session,
+            organization_id=server.organization_id,
+            actor=current.principal,
+            action=AuditAction.SERVER_ENABLED if enabled else AuditAction.SERVER_DISABLED,
+            target_type=AuditTargetType.SERVER,
+            target_id=server.id,
+        )
     await session.commit()
     await session.refresh(server)
     return server
@@ -234,6 +271,14 @@ async def delete_server(
             "Remove this server from all collections and unpublish its tools before deleting it."
         )
     await session.delete(locked_server)
+    await record_principal_audit_event(
+        session,
+        organization_id=locked_server.organization_id,
+        actor=current.principal,
+        action=AuditAction.SERVER_DELETED,
+        target_type=AuditTargetType.SERVER,
+        target_id=locked_server.id,
+    )
     await session.commit()
 
 
@@ -275,7 +320,11 @@ async def read_server(
 
 
 async def create_collection(
-    session: AsyncSession, organization_id: UUID, request: CollectionCreate
+    session: AsyncSession,
+    organization_id: UUID,
+    request: CollectionCreate,
+    *,
+    actor: AuthenticatedPrincipal | None = None,
 ) -> Collection:
     collection = Collection(
         organization_id=organization_id,
@@ -289,6 +338,19 @@ async def create_collection(
             session.add(collection)
     except IntegrityError as error:
         raise DuplicateResourceError("A collection with that slug already exists.") from error
+    if actor is not None:
+        await record_principal_audit_event(
+            session,
+            organization_id=organization_id,
+            actor=actor.principal,
+            action=AuditAction.COLLECTION_CREATED,
+            target_type=AuditTargetType.COLLECTION,
+            target_id=collection.id,
+            metadata={
+                "collection_slug": collection.slug,
+                "exposure_mode": collection.exposure_mode,
+            },
+        )
     await session.commit()
     await session.refresh(collection)
     return collection
@@ -298,7 +360,9 @@ async def register_collection(
     session: AsyncSession, current: AuthenticatedPrincipal, request: CollectionCreate
 ) -> Collection:
     await _authorize_organization_action(session, current, "collection:create")
-    return await create_collection(session, current.require_organization_id(), request)
+    return await create_collection(
+        session, current.require_organization_id(), request, actor=current
+    )
 
 
 async def _authorized_collection(
@@ -333,8 +397,23 @@ async def update_collection(
     request: CollectionUpdate,
 ) -> Collection:
     collection = await require_collection_update(session, current, collection_id)
-    for field, value in request.model_dump(exclude_unset=True).items():
+    changes = {
+        field: value
+        for field, value in request.model_dump(exclude_unset=True).items()
+        if getattr(collection, field) != value
+    }
+    for field, value in changes.items():
         setattr(collection, field, value)
+    if changes:
+        await record_principal_audit_event(
+            session,
+            organization_id=collection.organization_id,
+            actor=current.principal,
+            action=AuditAction.COLLECTION_UPDATED,
+            target_type=AuditTargetType.COLLECTION,
+            target_id=collection.id,
+            metadata={"changed_fields": ",".join(sorted(changes))},
+        )
     await session.commit()
     await session.refresh(collection)
     return collection
@@ -376,7 +455,12 @@ async def list_collections(
 
 
 async def add_membership(
-    session: AsyncSession, organization_id: UUID, collection_id: UUID, request: MembershipCreate
+    session: AsyncSession,
+    organization_id: UUID,
+    collection_id: UUID,
+    request: MembershipCreate,
+    *,
+    actor: AuthenticatedPrincipal | None = None,
 ) -> CollectionMembership:
     await get_collection(session, organization_id, collection_id)
     await _lock_server(session, organization_id, request.server_id, key_share=True)
@@ -391,6 +475,16 @@ async def add_membership(
             session.add(membership)
     except IntegrityError as error:
         raise DuplicateResourceError("That server is already a collection member.") from error
+    if actor is not None:
+        await record_principal_audit_event(
+            session,
+            organization_id=organization_id,
+            actor=actor.principal,
+            action=AuditAction.COLLECTION_MEMBERSHIP_ADDED,
+            target_type=AuditTargetType.COLLECTION,
+            target_id=collection_id,
+            metadata={"server_id": str(request.server_id)},
+        )
     await session.commit()
     await session.refresh(membership)
     return membership
@@ -405,6 +499,7 @@ async def add_collection_member(
         current.require_organization_id(),
         collection_id,
         MembershipCreate(server_id=server_id),
+        actor=current,
     )
 
 
@@ -412,7 +507,9 @@ async def remove_collection_member(
     session: AsyncSession, current: AuthenticatedPrincipal, collection_id: UUID, server_id: UUID
 ) -> None:
     await _authorized_collection(session, current, "collection:manage_members", collection_id)
-    await remove_membership(session, current.require_organization_id(), collection_id, server_id)
+    await remove_membership(
+        session, current.require_organization_id(), collection_id, server_id, actor=current
+    )
 
 
 async def list_collection_memberships(
@@ -477,12 +574,27 @@ async def list_collection_tool_rows(
 
 
 async def remove_membership(
-    session: AsyncSession, organization_id: UUID, collection_id: UUID, server_id: UUID
+    session: AsyncSession,
+    organization_id: UUID,
+    collection_id: UUID,
+    server_id: UUID,
+    *,
+    actor: AuthenticatedPrincipal | None = None,
 ) -> None:
     membership = await session.get(CollectionMembership, (collection_id, server_id))
     if membership is None or membership.organization_id != organization_id:
         raise MissingResourceError("Collection membership not found.")
     await session.delete(membership)
+    if actor is not None:
+        await record_principal_audit_event(
+            session,
+            organization_id=organization_id,
+            actor=actor.principal,
+            action=AuditAction.COLLECTION_MEMBERSHIP_REMOVED,
+            target_type=AuditTargetType.COLLECTION,
+            target_id=collection_id,
+            metadata={"server_id": str(server_id)},
+        )
     await session.commit()
 
 
@@ -729,6 +841,15 @@ async def publish_tool(
         raise DuplicateResourceError(
             "A publication already uses that tool or published name."
         ) from error
+    await record_principal_audit_event(
+        session,
+        organization_id=current.require_organization_id(),
+        actor=current.principal,
+        action=AuditAction.PUBLICATION_CREATED,
+        target_type=AuditTargetType.PUBLICATION,
+        target_id=publication.id,
+        metadata={"published_name": publication.published_name},
+    )
     await session.commit()
     await session.refresh(publication)
     return publication
@@ -750,7 +871,11 @@ async def update_publication(
     )
     if publication is None:
         raise MissingResourceError("Tool publication not found.")
-    updates = request.model_dump(exclude_unset=True)
+    updates = {
+        field: value
+        for field, value in request.model_dump(exclude_unset=True).items()
+        if getattr(publication, field) != value
+    }
     if updates.get("published_name") is not None:
         await _ensure_publication_available(
             session,
@@ -765,6 +890,16 @@ async def update_publication(
                 setattr(publication, field, value)
     except IntegrityError as error:
         raise DuplicateResourceError("A publication already uses that published name.") from error
+    if updates:
+        await record_principal_audit_event(
+            session,
+            organization_id=current.require_organization_id(),
+            actor=current.principal,
+            action=AuditAction.PUBLICATION_UPDATED,
+            target_type=AuditTargetType.PUBLICATION,
+            target_id=publication.id,
+            metadata={"changed_fields": ",".join(sorted(updates))},
+        )
     await session.commit()
     await session.refresh(publication)
     return publication
@@ -807,4 +942,12 @@ async def remove_publication(
     if publication is None:
         raise MissingResourceError("Tool publication not found.")
     await session.delete(publication)
+    await record_principal_audit_event(
+        session,
+        organization_id=current.require_organization_id(),
+        actor=current.principal,
+        action=AuditAction.PUBLICATION_DELETED,
+        target_type=AuditTargetType.PUBLICATION,
+        target_id=publication.id,
+    )
     await session.commit()

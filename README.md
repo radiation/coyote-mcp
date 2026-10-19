@@ -33,6 +33,15 @@ Visit `http://localhost:8000/healthz`. MCP is mounted at `/mcp/`.
 Alembic configuration is in the repository-root `alembic.ini`; the environment
 and revision scripts are under `alembic/` and `alembic/versions/`.
 
+## Production deployment
+
+The development Compose workflow is not a production deployment. Production
+uses the non-root Docker artifact with external PostgreSQL 17+, TLS terminated
+by a trusted reverse proxy, environment/secret injection, and a separately run
+singleton Alembic release job. See [Production deployment](docs/operations/production-deployment.md)
+and [compose.production.yaml](compose.production.yaml) for the configuration,
+proxy, migration, rollback, and image-runtime contract.
+
 ## Phase 2A authentication and authorization
 
 Phase 2A introduces one configured organization boundary. The `0004` migration
@@ -80,6 +89,25 @@ Assignments can be organization-wide or collection-scoped. Collection-scoped
 assignments grant permissions only for that collection and never organization-wide
 server management. Authorization defaults to deny; hidden cross-organization
 resources return 404.
+
+## Administrative audit retrieval
+
+The read-only administrative audit API is limited to human organization owners
+and administrators whose current authorization and PAT scope include
+`audit:read`. It is not available to service principals or MCP tools:
+
+```bash
+curl 'http://localhost:8000/api/v1/audit-events?limit=50&action=server.created' \
+  -H "Authorization: Bearer $COYOTE_AUDIT_PAT"
+```
+
+`GET /api/v1/audit-events` uses validated, allowlisted filters, including an
+immutable `actor_id` UUID that survives principal deletion, and an opaque
+newest-first keyset cursor; `GET /api/v1/audit-events/{event_id}` is likewise
+restricted to the active organization. The API does not provide export,
+deletion, archival, or retention scheduling. See
+[the security model](docs/ai-context/security-model.md#audit-retrieval-retention-and-future-export)
+for retention, hold, backup/recovery, and future-export requirements.
 
 FastMCP protocol endpoints are deliberately disabled with `503` in this phase,
 because the protocol adapter cannot yet enforce the shared policy layer. Health
@@ -483,7 +511,7 @@ CI status check as required (and optionally require the branch to be up to date)
 - Search, embedding index, and collection filtering
 - Console CRUD workflows for servers, collections, publications, principals,
   tokens, and identity providers
-- Metrics, audits, and production hardening
+- Metrics, audit export/retention operations, and remaining production hardening
 
 Discovery currently supports Streamable HTTP only. Catalog results come from the
 database and do not make downstream requests; failed discovery leaves the prior

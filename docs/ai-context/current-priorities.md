@@ -2,6 +2,25 @@
 
 ## Completed
 
+- **Phase 5 P5-02:** Successful security-sensitive state mutations now write
+  tenant-scoped, actor-attributed, append-only audit events in their existing
+  transactions. Coverage includes organization bootstrap, PATs, identity
+  administration, server/collection/publication configuration, downstream
+  authentication configuration, shared credentials, and Connected Apps. P5-02C
+  attributable PAT/browser authentication failures and centralized API,
+  console, and MCP collection authorization denials are independently
+  persisted without changing denied outcomes. Unattributable credentials and
+  pre-tenant OIDC failures remain sanitized operational logs because the audit
+  ledger is tenant-scoped. `GatewayService.execute_tool` independently records
+  one bounded `mcp.execution` result with actor/tenant, correlation, tool/server
+  UUIDs, stable category, and duration; it never persists tool data, credentials,
+  headers, or downstream content. Audit write loss is a sanitized warning and
+  does not change or retry execution. P5-02C3 adds the read-only
+  `/api/v1/audit-events` ledger API: organization owners and administrators
+  with `audit:read` receive only bounded, allowlist-filtered, keyset-paginated
+  pages from their active organization; service principals and MCP operations
+  cannot read it. P5-02 is implemented. Export, retention scheduling,
+  legal/incident-hold enforcement, and privileged purge remain P5-04 work.
 - **Phase 1:** PostgreSQL-backed registration of Streamable HTTP MCP servers,
   generation-safe tool discovery, persisted catalog, and collections.
 - **Phase 2:** Organization-scoped roles and PATs; service principals;
@@ -87,8 +106,8 @@
   collection's available and published tools. Membership is managed with the
   existing `collection:manage_members` action. Removing a server from a
   collection also removes its publications in that collection. The page shows
-  the endpoint as `/mcp/collections/{slug}` derived from the request origin, so
-  it must be checked behind a reverse proxy. Collection pages authorize each
+  the endpoint as `/mcp/collections/{slug}` using the configured canonical
+  public origin in production. Collection pages authorize each
   collection individually, so collection-scoped roles work without an
   organization-wide grant; the collection list shows only collections the
   viewer may read. Pagination filters each page after fetching it, so a
@@ -138,9 +157,31 @@
   creation increments the epoch in the same transaction as the active organization change,
   so an old form cannot pair the new organization with the previous token. New sessions
   receive new tokens. Missing, invalid, and cross-session tokens are rejected.
+- **Phase 5 P5-01 production deployment and configuration:** The portable
+  Docker image installs locked runtime dependencies, runs as a non-root
+  `coyote` user, and includes a liveness health check. Production settings fail
+  closed for the external PostgreSQL asyncpg URL, session secret, canonical
+  HTTPS origin, allowed hosts, trusted proxy networks, unsafe destination
+  exceptions, and enabled optional OIDC/credential features. The separate
+  `compose.production.yaml` has no source mounts, reload, local database, or
+  insecure downstream exceptions; it provides a singleton `release` migration
+  job and loopback-only application port. Trusted proxy middleware accepts
+  forwarding/request IDs only from configured networks, and app shutdown
+  disposes the database engine after FastMCP lifespan shutdown.
+- **Phase 5 P5-02A durable audit foundation:** Migration `0021` adds
+  organization-scoped immutable audit events with controlled event taxonomy,
+  actor/target snapshots, correlation IDs, bounded allowlisted metadata, and
+  PostgreSQL/ORM append-only enforcement. The transaction-owned audit service
+  flushes without committing so later instrumentation can make security
+  mutations and evidence atomic. P5-02C1 independently commits attributable
+  denial/failure evidence and logs write failures without changing the original
+  denied response; audit reading, export, retention, and MCP execution outcomes
+  remain deferred.
 
 ## Next
 
+- **Phase 5 P5-02C3:** Define any remaining read-only security activity policy.
+  Add query/export and retention policy only in their dedicated scope.
 - **Phase 3B:** Audit events, cancellation, and operational metrics for MCP
   execution, plus downstream authentication follow-ups (provider discovery,
   additional providers, and credential re-seal tooling).
@@ -154,6 +195,6 @@
 
 - Downstream authentication for providers beyond GitHub, GitHub App support,
   and revocation for providers that offer it.
-- Execution cancellation, audit retention, and policy-enforcement contract.
+- Execution cancellation and policy-enforcement contract.
 - Search/indexing design and how it exposes only currently authorized tools.
-- Production operations: audit/event retention, metrics, and hardening scope.
+- Production operations: audit/event retention implementation, metrics, and hardening scope.

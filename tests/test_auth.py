@@ -4,6 +4,8 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from coyote_mcp import auth
+from coyote_mcp.audit import AuditPersistenceError
 from coyote_mcp.auth import (
     ALL_ACTIONS,
     ExternalIdentityResolutionError,
@@ -23,6 +25,7 @@ from coyote_mcp.auth import (
     select_active_organization,
 )
 from coyote_mcp.models import (
+    AuditEvent,
     BrowserSession,
     Collection,
     ExternalGroup,
@@ -30,6 +33,7 @@ from coyote_mcp.models import (
     InstanceAdministrator,
     Organization,
     OrganizationMembership,
+    PersonalAccessToken,
     Principal,
     RoleAssignment,
 )
@@ -79,6 +83,48 @@ async def test_pat_authentication_revocation_and_disabled_principal(
 
 
 @pytest.mark.asyncio
+async def test_revoked_pat_authentication_is_independently_audited(
+    session: AsyncSession, organization: Organization
+) -> None:
+    principal = await create_principal(session, organization)
+    token, plaintext = await issue_pat(
+        session, principal, organization.id, "test", {"server:read"}, timedelta(days=1), Settings()
+    )
+    token.revoked_at = datetime.now(UTC)
+    await session.commit()
+
+    assert await authenticate_token(session, plaintext) is None
+
+    event = await session.scalar(
+        select(AuditEvent).where(AuditEvent.action == "authentication.failed")
+    )
+    assert event is not None
+    assert event.organization_id == organization.id
+    assert event.actor_id is None
+    assert event.metadata_ == {"auth_method": "pat", "failure_code": "revoked"}
+
+
+@pytest.mark.asyncio
+async def test_revoked_browser_session_is_independently_audited(
+    session: AsyncSession, organization: Organization
+) -> None:
+    principal = await create_principal(session, organization)
+    browser_session, token = await issue_browser_session(session, principal, [], Settings())
+    browser_session.active_organization_id = organization.id
+    browser_session.revoked_at = datetime.now(UTC)
+    await session.commit()
+
+    assert await authenticate_browser_session(session, token) is None
+
+    event = await session.scalar(
+        select(AuditEvent).where(AuditEvent.action == "authentication.failed")
+    )
+    assert event is not None
+    assert event.organization_id == organization.id
+    assert event.metadata_ == {"auth_method": "browser_session", "failure_code": "revoked"}
+
+
+@pytest.mark.asyncio
 async def test_pat_scope_attenuation_and_expiry(session, organization: Organization) -> None:
     principal = await create_principal(session, organization, "viewer")
     with pytest.raises(ValueError, match="Token scopes"):
@@ -95,6 +141,37 @@ async def test_pat_scope_attenuation_and_expiry(session, organization: Organizat
         await issue_pat(
             session, principal, organization.id, "expired", {"server:read"}, timedelta(), Settings()
         )
+
+
+@pytest.mark.asyncio
+async def test_pat_audit_failure_rolls_back_token(
+    session, organization: Organization, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    principal = await create_principal(session, organization)
+
+    async def failing_audit(*args: object, **kwargs: object) -> None:
+        raise AuditPersistenceError("audit storage unavailable")
+
+    monkeypatch.setattr(auth, "record_principal_audit_event", failing_audit)
+    with pytest.raises(AuditPersistenceError):
+        await issue_pat(
+            session,
+            principal,
+            organization.id,
+            "audited-token",
+            {"server:read"},
+            timedelta(days=1),
+            Settings(),
+            actor=principal,
+        )
+    await session.rollback()
+
+    assert (
+        await session.scalar(
+            select(PersonalAccessToken).where(PersonalAccessToken.name == "audited-token")
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio

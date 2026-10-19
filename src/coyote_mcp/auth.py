@@ -14,6 +14,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
+from coyote_mcp.audit import (
+    AuditAction,
+    AuditTargetType,
+    record_independent_denial_event,
+    record_principal_audit_event,
+)
 from coyote_mcp.models import (
     BrowserSession,
     Collection,
@@ -46,6 +52,7 @@ ALL_ACTIONS = frozenset(
         "credential:revoke",
         "connection:manage_own",
         "policy:manage",
+        "audit:read",
     }
 )
 ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
@@ -174,6 +181,24 @@ async def _enabled_organization(session: AsyncSession, organization_id: UUID) ->
     )
 
 
+async def _record_authentication_failure(
+    session: AsyncSession,
+    organization_id: UUID | None,
+    *,
+    auth_method: str,
+    failure_code: str,
+) -> None:
+    if organization_id is None:
+        return
+    await record_independent_denial_event(
+        session,
+        organization_id=organization_id,
+        action=AuditAction.AUTHENTICATION_FAILED,
+        target_type=AuditTargetType.AUTHENTICATION,
+        metadata={"auth_method": auth_method, "failure_code": failure_code},
+    )
+
+
 async def authenticate_token(session: AsyncSession, value: str) -> AuthenticatedPrincipal | None:
     parts = _token_parts(value, "coyote_pat_")
     if parts is None:
@@ -194,13 +219,24 @@ async def authenticate_token(session: AsyncSession, value: str) -> Authenticated
         if token.expires_at.tzinfo is None
         else token.expires_at
     )
-    if (
-        not hmac.compare_digest(token.secret_hash, _hash_secret(secret))
-        or token.revoked_at is not None
-        or expires_at <= datetime.now(UTC)
-        or not principal.enabled
-        or await _enabled_membership(session, principal.id, token.organization_id) is None
-    ):
+    failure_code: str | None = None
+    if not hmac.compare_digest(token.secret_hash, _hash_secret(secret)):
+        failure_code = "invalid_secret"
+    elif token.revoked_at is not None:
+        failure_code = "revoked"
+    elif expires_at <= datetime.now(UTC):
+        failure_code = "expired"
+    elif not principal.enabled:
+        failure_code = "principal_disabled"
+    elif await _enabled_membership(session, principal.id, token.organization_id) is None:
+        failure_code = "membership_disabled"
+    if failure_code is not None:
+        await _record_authentication_failure(
+            session,
+            token.organization_id,
+            auth_method="pat",
+            failure_code=failure_code,
+        )
         return None
     token.last_used_at = datetime.now(UTC)
     await session.commit()
@@ -254,12 +290,22 @@ async def authenticate_browser_session(
     expires_at = browser_session.expires_at
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=UTC)
-    if (
-        not hmac.compare_digest(browser_session.token_hash, _hash_secret(secret))
-        or browser_session.revoked_at is not None
-        or expires_at <= datetime.now(UTC)
-        or not principal.enabled
-    ):
+    failure_code: str | None = None
+    if not hmac.compare_digest(browser_session.token_hash, _hash_secret(secret)):
+        failure_code = "invalid_secret"
+    elif browser_session.revoked_at is not None:
+        failure_code = "revoked"
+    elif expires_at <= datetime.now(UTC):
+        failure_code = "expired"
+    elif not principal.enabled:
+        failure_code = "principal_disabled"
+    if failure_code is not None:
+        await _record_authentication_failure(
+            session,
+            browser_session.active_organization_id,
+            auth_method="browser_session",
+            failure_code=failure_code,
+        )
         return None
     activity_at = browser_session.last_activity_at
     if activity_at.tzinfo is None:
@@ -351,6 +397,7 @@ async def issue_pat(
     settings: Settings,
     *,
     commit: bool = True,
+    actor: Principal | None = None,
 ) -> tuple[PersonalAccessToken, str]:
     if (
         not principal.enabled
@@ -383,6 +430,17 @@ async def issue_pat(
         expires_at=datetime.now(UTC) + lifetime,
     )
     session.add(token)
+    if actor is not None:
+        await session.flush()
+        await record_principal_audit_event(
+            session,
+            organization_id=organization_id,
+            actor=actor,
+            action=AuditAction.CREDENTIAL_CREATED,
+            target_type=AuditTargetType.CREDENTIAL,
+            target_id=token.id,
+            metadata={"credential_kind": "pat"},
+        )
     if commit:
         await session.commit()
     else:
@@ -637,6 +695,15 @@ async def create_initial_organization(
         )
         current.browser_session.active_organization_id = organization.id
         current.browser_session.csrf_epoch += 1
+        await record_principal_audit_event(
+            session,
+            organization_id=organization.id,
+            actor=current.principal,
+            action=AuditAction.ORGANIZATION_CREATED,
+            target_type=AuditTargetType.ORGANIZATION,
+            target_id=organization.id,
+            metadata={"organization_slug": organization.slug},
+        )
         await session.commit()
     except IntegrityError as error:
         await session.rollback()
@@ -662,6 +729,8 @@ async def authorize(
         return Decision(False, "unknown_action")
     if not principal.enabled:
         return Decision(False, "principal_disabled")
+    if action == "audit:read" and principal.identity_type == "service":
+        return Decision(False, "service_principal_not_permitted")
     if resource is None:
         organization_id = context.get("organization_id") if context else None
         collection_id: UUID | None = None

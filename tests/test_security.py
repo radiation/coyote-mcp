@@ -1,3 +1,6 @@
+import os
+from unittest.mock import patch
+
 import httpx
 import httpx2
 import pytest
@@ -83,11 +86,26 @@ def test_oidc_endpoint_requires_https_and_provider_trust_boundary(
 
 
 def test_production_requires_strong_external_session_secret() -> None:
+    def settings(session_secret_key: str) -> Settings:
+        with patch.dict(os.environ, {}, clear=True):
+            return Settings(
+                _env_file=None,
+                environment="production",
+                database_url="postgresql+asyncpg://coyote:password@postgres.example/coyote_mcp",
+                public_base_url="https://gateway.example",
+                allowed_hosts=["gateway.example"],
+                trusted_proxy_networks=["10.0.0.0/8"],
+                oidc_enabled=False,
+                downstream_credentials_enabled=False,
+                downstream_oauth_enabled=False,
+                session_secret_key=session_secret_key,
+            )
+
     with pytest.raises(ValueError, match="SESSION_SECRET_KEY"):
-        Settings(environment="production", session_secret_key=DEVELOPMENT_SESSION_SECRET)
+        settings(DEVELOPMENT_SESSION_SECRET)
     with pytest.raises(ValueError, match="SESSION_SECRET_KEY"):
-        Settings(environment="production", session_secret_key="too-short")
-    assert Settings(environment="production", session_secret_key="a" * 32).is_development is False
+        settings("too-short")
+    assert settings("a" * 32).is_development is False
 
 
 @pytest.mark.asyncio

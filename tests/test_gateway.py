@@ -22,6 +22,7 @@ from coyote_mcp.app import app
 from coyote_mcp.auth import AuthenticatedPrincipal, authenticate_token, issue_pat
 from coyote_mcp.gateway import GatewayError, GatewayService
 from coyote_mcp.models import (
+    AuditEvent,
     Collection,
     CollectionMembership,
     CollectionToolPublication,
@@ -253,6 +254,68 @@ async def test_gateway_scoped_discovery_description_and_schema_validation(
     assert global_description["collection_slug"] == "engineering"
     with pytest.raises(GatewayError, match="arguments"):
         await service.execute_tool(session, current, tool.id, {"issue": "invalid"}, "engineering")
+    event = await session.scalar(
+        select(AuditEvent).where(
+            AuditEvent.action == "mcp.execution",
+            AuditEvent.target_id == tool.id,
+        )
+    )
+    assert event is not None
+    assert event.outcome == "failure"
+    assert event.metadata_["execution_code"] == "invalid_input"
+
+
+@pytest.mark.asyncio
+async def test_gateway_audits_opaque_execution_denials_once(session: AsyncSession) -> None:
+    principal, _, tool, organization = await _collection_consumer(session)
+    current = AuthenticatedPrincipal(
+        principal,
+        frozenset({"tool:discover"}),
+        None,
+        organization.id,
+        credential_context="pat",
+    )
+
+    with pytest.raises(GatewayError, match="not available"):
+        await GatewayService(Settings()).execute_tool(
+            session, current, tool.id, {"issue": 1}, "engineering"
+        )
+
+    events = list(
+        (
+            await session.scalars(
+                select(AuditEvent).where(
+                    AuditEvent.action == "mcp.execution",
+                    AuditEvent.target_id == tool.id,
+                )
+            )
+        ).all()
+    )
+    assert [(event.outcome, event.metadata_["execution_code"]) for event in events] == [
+        ("denied", "authorization_denied")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_native_collection_denial_is_independently_audited(session: AsyncSession) -> None:
+    principal, _, _, organization = await _collection_consumer(session)
+    current = AuthenticatedPrincipal(
+        principal, frozenset({"tool:discover"}), None, organization.id, credential_context="pat"
+    )
+
+    with pytest.raises(GatewayError, match="Collection endpoint"):
+        await GatewayService(Settings()).native_tools(session, current, "engineering")
+
+    event = await session.scalar(
+        select(AuditEvent).where(AuditEvent.action == "authorization.denied")
+    )
+    assert event is not None
+    assert event.organization_id == organization.id
+    assert event.actor_id == principal.id
+    assert event.metadata_ == {
+        "action": "tool:discover",
+        "reason_code": "collection_access_denied",
+    }
 
 
 @pytest.mark.asyncio
@@ -1111,6 +1174,26 @@ async def test_gateway_preserves_tool_errors_and_enforces_execution_limits(
                 )
             ).execute_tool(session, current, large_tool.id, {}, "engineering")
 
+    events = list(
+        (
+            await session.scalars(select(AuditEvent).where(AuditEvent.action == "mcp.execution"))
+        ).all()
+    )
+    assert len(events) == 4
+    assert {
+        (event.target_id, event.outcome, event.metadata_["execution_code"]) for event in events
+    } == {
+        (failing_tool.id, "success", "success"),
+        (nullable_tool.id, "success", "success"),
+        (delayed_tool.id, "failure", "downstream_timeout"),
+        (large_tool.id, "failure", "invalid_downstream_response"),
+    }
+    for event in events:
+        assert event.organization_id == organization.id
+        assert event.actor_id == principal.id
+        assert event.metadata_["server_id"] == str(tool.server_id)
+        assert set(event.metadata_) == {"execution_code", "duration_ms", "server_id"}
+
 
 @pytest.mark.asyncio
 async def test_gateway_execution_does_not_finalize_caller_transaction(
@@ -1131,6 +1214,40 @@ async def test_gateway_execution_does_not_finalize_caller_transaction(
     assert result["structured_content"] == {"issue": 42}
     assert unrelated in session.new
     await session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_execution_audit_write_failure_does_not_repeat_or_fail_execution(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import coyote_mcp.audit as audit
+    import coyote_mcp.gateway as gateway
+
+    _, token, tool, _ = await _collection_consumer(session)
+    current = await authenticate_token(session, token)
+    assert current is not None
+    downstream_calls = 0
+
+    async def failing_record(*_: object, **__: object) -> AuditEvent:
+        raise audit.AuditPersistenceError("database unavailable")
+
+    original_call_tool = gateway.Client.call_tool
+
+    async def counting_call_tool(client: Client, *args: object, **kwargs: object) -> object:
+        nonlocal downstream_calls
+        downstream_calls += 1
+        return await original_call_tool(client, *args, **kwargs)
+
+    monkeypatch.setattr(audit, "record_audit_event", failing_record)
+    monkeypatch.setattr(gateway.Client, "call_tool", counting_call_tool)
+    async with downstream_server() as (endpoint, _):
+        await point_tool_at_downstream(session, tool, endpoint)
+        result = await GatewayService(
+            Settings(allow_insecure_endpoints=True, allow_private_endpoints=True)
+        ).execute_tool(session, current, tool.id, {"issue": 42}, "engineering")
+
+    assert result["structured_content"] == {"issue": 42}
+    assert downstream_calls == 1
 
 
 @pytest.mark.asyncio

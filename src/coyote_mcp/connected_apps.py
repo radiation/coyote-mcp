@@ -14,6 +14,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coyote_mcp.audit import AuditAction, AuditTargetType, record_principal_audit_event
 from coyote_mcp.auth import AuthenticatedPrincipal, authorize, self_service_action_allowed
 from coyote_mcp.catalog import AuthorizationError, MissingResourceError, get_server
 from coyote_mcp.credential_vault import CredentialVaultError, SealedValue, open_sealed, seal
@@ -278,7 +279,17 @@ async def set_auth_policy(
     server = await _authorized_server_actions(
         session, current, server_id, "server:update", "credential:create"
     )
-    server.auth_policy = policy
+    if server.auth_policy != policy:
+        server.auth_policy = policy
+        await record_principal_audit_event(
+            session,
+            organization_id=server.organization_id,
+            actor=current.principal,
+            action=AuditAction.POLICY_UPDATED,
+            target_type=AuditTargetType.SERVER,
+            target_id=server.id,
+            metadata={"changed_fields": "auth_policy"},
+        )
     await session.commit()
     return server
 
@@ -433,11 +444,22 @@ async def save_integration(
     problems = _integration_problems(settings, integration)
     if data.enabled and problems:
         raise ConnectedAppError("configuration_incomplete", "; ".join(problems))
+    enabled_changed = integration.enabled != data.enabled
     integration.enabled = data.enabled
     integration.configuration_error = "; ".join(problems)[:255] or None
 
     if is_new:
         session.add(integration)
+    if is_new or replacement or enabled_changed:
+        await record_principal_audit_event(
+            session,
+            organization_id=organization_id,
+            actor=current.principal,
+            action=AuditAction.POLICY_UPDATED,
+            target_type=AuditTargetType.SERVER,
+            target_id=server.id,
+            metadata={"changed_fields": "oauth_integration"},
+        )
     try:
         await session.commit()
     except IntegrityError as error:
@@ -464,8 +486,19 @@ async def set_integration_enabled(
     problems = _integration_problems(settings, integration)
     if enabled and problems:
         raise ConnectedAppError("configuration_incomplete", "; ".join(problems))
+    changed = integration.enabled != enabled
     integration.enabled = enabled
     integration.configuration_error = "; ".join(problems)[:255] or None
+    if changed:
+        await record_principal_audit_event(
+            session,
+            organization_id=server.organization_id,
+            actor=current.principal,
+            action=AuditAction.POLICY_UPDATED,
+            target_type=AuditTargetType.SERVER,
+            target_id=server.id,
+            metadata={"changed_fields": "oauth_integration_enabled"},
+        )
     await session.commit()
     return _integration_view(integration)
 
@@ -515,6 +548,15 @@ async def set_shared_credential(
     else:
         credential.key_version = sealed.key_version
         credential.sealed_value = sealed.sealed
+    await record_principal_audit_event(
+        session,
+        organization_id=organization_id,
+        actor=current.principal,
+        action=AuditAction.CREDENTIAL_CREATED,
+        target_type=AuditTargetType.CREDENTIAL,
+        target_id=server.id,
+        metadata={"credential_kind": "shared_bearer", "key_version": sealed.key_version},
+    )
     try:
         await session.commit()
     except IntegrityError as error:
@@ -530,12 +572,23 @@ async def clear_shared_credential(
     server = await _authorized_server_actions(
         session, current, server_id, "server:update", "credential:revoke"
     )
-    await session.execute(
-        delete(DownstreamSharedCredential).where(
+    credential = await session.scalar(
+        select(DownstreamSharedCredential).where(
             DownstreamSharedCredential.organization_id == server.organization_id,
             DownstreamSharedCredential.server_id == server.id,
         )
     )
+    if credential is not None:
+        await session.delete(credential)
+        await record_principal_audit_event(
+            session,
+            organization_id=server.organization_id,
+            actor=current.principal,
+            action=AuditAction.CREDENTIAL_REVOKED,
+            target_type=AuditTargetType.CREDENTIAL,
+            target_id=server.id,
+            metadata={"credential_kind": "shared_bearer"},
+        )
     await session.commit()
 
 
@@ -630,6 +683,8 @@ async def start_connection(
         raise ConnectedAppError(
             "browser_session_required", "Connections can only be started from a browser session."
         )
+    if not settings.downstream_oauth_available:
+        raise ConnectedAppError("not_available", "Downstream OAuth is disabled.")
     server = await get_server(session, organization_id, server_id)
     integration = await _integration_for(session, organization_id, server_id)
     if (
@@ -679,6 +734,15 @@ async def start_connection(
             sealed_verifier=sealed.sealed,
             expires_at=now + TRANSACTION_LIFETIME,
         )
+    )
+    await record_principal_audit_event(
+        session,
+        organization_id=organization_id,
+        actor=current.principal,
+        action=AuditAction.CONNECTION_STARTED,
+        target_type=AuditTargetType.CONNECTION,
+        target_id=None,
+        metadata={"provider": integration.provider},
     )
     await session.commit()
     return build_authorization_url(
@@ -735,6 +799,8 @@ async def _store_connection(
     scopes: list[str],
     account_identifier: str | None,
     expires_at: datetime | None,
+    actor: AuthenticatedPrincipal,
+    provider: str,
 ) -> None:
     """Create or replace the caller's connection in one transaction.
 
@@ -753,22 +819,21 @@ async def _store_connection(
             .with_for_update()
         )
         if connection is None:
-            session.add(
-                DownstreamConnection(
-                    organization_id=organization_id,
-                    server_id=server_id,
-                    principal_id=principal_id,
-                    integration_revision=integration_revision,
-                    credential_revision=1,
-                    status=CONNECTION_STATUS_CONNECTED,
-                    key_version=sealed.key_version,
-                    sealed_tokens=sealed.sealed,
-                    scopes=scopes,
-                    account_identifier=account_identifier,
-                    access_token_expires_at=expires_at,
-                    last_refreshed_at=now,
-                )
+            connection = DownstreamConnection(
+                organization_id=organization_id,
+                server_id=server_id,
+                principal_id=principal_id,
+                integration_revision=integration_revision,
+                credential_revision=1,
+                status=CONNECTION_STATUS_CONNECTED,
+                key_version=sealed.key_version,
+                sealed_tokens=sealed.sealed,
+                scopes=scopes,
+                account_identifier=account_identifier,
+                access_token_expires_at=expires_at,
+                last_refreshed_at=now,
             )
+            session.add(connection)
         else:
             connection.status = CONNECTION_STATUS_CONNECTED
             connection.integration_revision = integration_revision
@@ -780,6 +845,16 @@ async def _store_connection(
             connection.access_token_expires_at = expires_at
             connection.last_refreshed_at = now
         try:
+            await session.flush()
+            await record_principal_audit_event(
+                session,
+                organization_id=organization_id,
+                actor=actor.principal,
+                action=AuditAction.CONNECTION_CONNECTED,
+                target_type=AuditTargetType.CONNECTION,
+                target_id=connection.id,
+                metadata={"provider": provider},
+            )
             await session.commit()
         except IntegrityError:
             await session.rollback()
@@ -810,6 +885,8 @@ async def complete_connection(
         raise ConnectedAppError(
             "browser_session_required", "Connections can only be completed from a browser session."
         )
+    if not settings.downstream_oauth_available:
+        raise ConnectedAppError("not_available", "Downstream OAuth is disabled.")
     if not state:
         raise ConnectedAppError("invalid_callback", INVALID_CALLBACK_MESSAGE)
 
@@ -921,6 +998,8 @@ async def complete_connection(
         scopes=list(tokens.scopes),
         account_identifier=account_identifier,
         expires_at=tokens.expires_at,
+        actor=current,
+        provider=integration.provider,
     )
     return server.name
 
@@ -965,6 +1044,18 @@ async def disconnect(
         revocation_endpoint = integration.revocation_endpoint or ""
 
     await session.delete(connection)
+    await record_principal_audit_event(
+        session,
+        organization_id=organization_id,
+        actor=current.principal,
+        action=AuditAction.CONNECTION_DISCONNECTED,
+        target_type=AuditTargetType.CONNECTION,
+        target_id=connection.id,
+        metadata={
+            "provider": integration.provider if integration is not None else "unknown",
+            "revocation_result": "not_attempted",
+        },
+    )
     await session.commit()
 
     provider_revoked = False

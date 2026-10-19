@@ -21,6 +21,15 @@ through settings; ID tokens and refresh tokens are not persisted. The privileged
 administrator binding; normal browser authentication always validates OIDC
 claims before it issues a session.
 
+Production ingress is a separate trust boundary. Production settings require a
+canonical HTTPS public origin, explicit allowed hosts, and explicit trusted
+proxy IP/CIDR networks. Host validation rejects unexpected `Host` headers.
+Only a direct peer in a trusted proxy network can set `X-Forwarded-Proto` or
+supply a validated `X-Request-ID`; all other client-supplied forwarded values
+are ignored. The request ID is generated when no trusted valid value exists and
+is returned in the response. Console MCP endpoint URLs use the canonical public
+origin instead of request or forwarded host input.
+
 ## Authorization and tenancy
 
 Authorization is centralized in `auth.authorize`, default-deny, and scoped to an
@@ -218,5 +227,155 @@ request headers. The configured response-size limit is applied immediately
 after FastMCP materializes a result. Its current public client transport does
 not provide a compatible streaming response-limit hook.
 
-There are no audit events, execution cancellation, or fine-grained per-tool deny
-policies yet. Tool annotations never establish safety.
+## Security audit events
+
+Migration `0021` provides a durable PostgreSQL audit ledger. Every row has an
+organization ID, timestamp, actor snapshot, controlled action/outcome, target
+snapshot, optional request ID, and allowlisted JSONB metadata. Actor and target
+IDs intentionally have no foreign keys: deleting an originating principal or
+target cannot rewrite or erase historical evidence. The organization reference
+uses `RESTRICT`, and tenant-scoped readers must always predicate events by that
+organization ID.
+
+`audit.record_audit_event` accepts the caller's `AsyncSession`, flushes but
+never commits, and propagates an `AuditPersistenceError`. A security-sensitive
+mutation that emits an event through this service therefore commits atomically
+with its event or rolls back both. The service accepts only enum-backed event
+names/outcomes and per-event scalar metadata allowlists; it rejects arbitrary
+objects, unsupported fields, and oversized content before storage. It never
+automatically serializes exception text, credentials, bearer tokens, OAuth
+codes, headers, request bodies, or downstream payloads.
+
+Both the ORM and PostgreSQL triggers reject updates and deletes. This protects
+against accidental application writes and ordinary database roles; it does not
+prevent a privileged database operator from disabling triggers, changing the
+schema, or directly altering data. Retention is intentionally deferred to a
+separately authorized future policy.
+
+P5-02B instruments successful security-sensitive mutations through their
+existing transactions: organization bootstrap; PAT issue/revocation;
+server, collection, membership, and publication changes; server authentication
+policy, OAuth integration, shared credential, and connected-app lifecycle
+changes; and the current service-principal and external-group role-mapping
+administration endpoints. The actual authorized principal is the actor, and
+the organization comes from the authorized tenant context rather than request
+input. System actors remain explicit and are never substituted for a missing
+human actor. No-op requests do not produce success events.
+
+P5-02C must define explicit independent-write policy for authorization denials,
+authentication failures, MCP outcomes, and read-only security events that occur
+outside a mutation transaction. Execution cancellation and fine-grained
+per-tool deny policies remain unimplemented. Tool annotations never establish
+safety.
+
+### Authentication and authorization denial auditing
+
+P5-02C1 independently persists classified PAT and browser-session failures
+only when a server-side credential/session record supplies a trustworthy
+organization. It records a system actor, `authentication.failed`, the
+authentication mechanism, and a bounded reason category; it never associates
+an unauthenticated attempt with a principal. Completely unrecognized or
+malformed credentials, unaffiliated browser sessions, and OIDC failures before
+an organization can be safely established remain sanitized operational logs,
+not tenant audit events. The tenant-scoped audit schema deliberately cannot
+represent them without inventing an organization.
+
+Central API and console authorization checks, plus denied MCP collection
+endpoint access, independently write `authorization.denied` when they have an
+authenticated principal and active organization. The audit row records that
+principal's trustworthy actor snapshot, a requested action, a bounded policy
+reason, and the request correlation ID. Cross-organization
+lookups that intentionally return not-found to prevent resource enumeration
+remain unaudited because no authorization decision is exposed.
+
+Denial-event writes use a short-lived database session and transaction separate
+from the request transaction. `COYOTE_INDEPENDENT_AUDIT_TIMEOUT_SECONDS`
+defaults to a conservative two-second deadline covering session acquisition,
+insert/flush, and commit. Timeout or persistence failure is sanitized to
+operational logging and never changes an authentication failure or
+authorization denial into success; parent-request cancellation still
+propagates normally. Successful privileged mutations retain the
+P5-02B caller-transaction, fail-closed guarantee; they do not use this path.
+### MCP execution-outcome auditing
+
+P5-02C2 records one `mcp.execution` event at the terminal
+`GatewayService.execute_tool` boundary. The event uses the authenticated human
+or service actor and its organization, the request correlation ID, the
+persisted tool UUID as target, and the persisted server UUID in bounded
+metadata. Its stable categories are `success`, `authorization_denied`,
+`invalid_input`, `downstream_authentication_failure`, `downstream_timeout`,
+`downstream_transport_failure`, `invalid_downstream_response`, and
+`internal_failure`; the audit outcome is respectively `success`, `denied`, or
+`failure`.
+
+Execution event metadata is restricted to the category, integer duration, and
+server UUID. It never stores tool arguments, results, raw protocol payloads,
+tokens, credentials, authorization headers, exception strings, or downstream
+error content. Writes reuse the independent two-second bounded transaction and
+database pool. A timeout or persistence failure is a sanitized operational
+warning only: it does not change the execution response, alter its failure
+classification, retry the downstream call, or buffer work asynchronously.
+Cancellation propagates normally. This is best-effort audit durability, so an
+execution may complete when its event cannot be persisted. No sampling is
+implemented; high-volume deployments should size database capacity accordingly.
+Query/export, retention, and purge remain deferred.
+
+### Audit retrieval, retention, and future export
+
+`GET /api/v1/audit-events` and `GET /api/v1/audit-events/{event_id}` are
+read-only administrative endpoints. `audit:read` is deliberately granted only
+by organization-wide `owner` and `administrator` roles; it is not available
+from a collection-scoped role. A PAT must include that scope and still pass
+current role evaluation. Browser-session instance administrators retain the
+centralized browser-only override. Service principals are categorically denied
+this action even if assigned an otherwise privileged role, and MCP protocol
+operations do not expose the ledger.
+
+The service, not only the route, fixes each list and detail query to the
+authenticated active organization and calls `auth.authorize`. It never accepts
+an organization ID. A cursor contains only a validated timestamp and event UUID
+position; it is not an authorization credential, and an otherwise valid cursor
+from another organization cannot widen the mandatory organization predicate.
+Lists are newest first by `(occurred_at DESC, id DESC)`, return at most 100
+records, and use the last record as a keyset boundary so inserts after a first
+page do not shift later pages. Supported filters are timezone-aware time bounds,
+allowlisted action/outcome/target type, immutable actor UUID, and target UUID.
+Actor filtering remains available after the originating principal is removed.
+There is no raw SQL, offset, metadata-expression, or
+cross-organization filtering capability. Responses omit organization IDs,
+credentials, endpoints, exception data, and untrusted raw objects; the only
+metadata returned is the audit writer's scalar allowlist.
+
+Cursors deliberately do not bind filters cryptographically or retain server-side
+query state. Reusing one with changed filters can therefore produce a different
+or shorter result window, but cannot change the organization predicate, relax
+the current authorization decision, or disclose another tenant's records.
+
+Retention is an operational policy, not a statement of regulatory compliance.
+The initial recommendations are configurable 365-day retention for
+security/administrative mutations, 180 days for authentication and
+authorization denials, and 90 days for high-volume `mcp.execution` events.
+Incident and legal holds must make affected evidence ineligible for purge and
+must be considered before modifying any schedule. Ordinary application users
+cannot update or delete audit rows. P5-04 must implement any purge as a
+separately authorized, batched, observable privileged operation: PostgreSQL's
+append-only trigger must remain effective for application roles, with any
+narrow retention-only exception enforced inside a controlled database function
+or equivalently constrained operator path after hold checks. No deletion,
+archival, retention job, or scheduler exists today.
+
+The `(organization_id, occurred_at, id)` index supports the retrieval order;
+the existing organization-target index supports target filters. Operators must
+monitor high-volume execution-event storage, index growth, vacuum behavior, and
+query latency before setting retention. PostgreSQL backups, PITR, and restore
+tests must include audit rows, index definitions, hold state once implemented,
+and the corresponding historical credential-key recovery material. P5-04 owns
+the backup/recovery and purge runbooks.
+
+A future bulk export must require the same human `audit:read` policy, remain
+organization-only, enforce explicit bounded time windows and record counts,
+and expose only the same approved scalar fields. It must record requester,
+organization, selected window/field set, count, and completion/failure as
+accountability evidence without recording exported contents. Export design must
+also account for retention, holds, privacy/redaction obligations, secure
+delivery, and auditability. No CSV/JSON export or streaming path is implemented.

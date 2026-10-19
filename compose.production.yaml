@@ -1,0 +1,49 @@
+x-app-environment: &app-environment
+  ENVIRONMENT: production
+  DATABASE_URL: ${DATABASE_URL:?set an external PostgreSQL 17+ asyncpg URL}
+  SESSION_SECRET_KEY: ${SESSION_SECRET_KEY:?set a secret of at least 32 characters}
+  COYOTE_PUBLIC_BASE_URL: ${COYOTE_PUBLIC_BASE_URL:?set the HTTPS public origin}
+  COYOTE_ALLOWED_HOSTS: ${COYOTE_ALLOWED_HOSTS:?set a JSON list containing the public host}
+  COYOTE_TRUSTED_PROXY_NETWORKS: ${COYOTE_TRUSTED_PROXY_NETWORKS:?set proxy IPs or CIDRs as a JSON list}
+  COYOTE_OIDC_ENABLED: ${COYOTE_OIDC_ENABLED:-true}
+  OIDC_ISSUER: ${OIDC_ISSUER:-}
+  OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+  OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+  OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-}
+  COYOTE_DOWNSTREAM_CREDENTIALS_ENABLED: ${COYOTE_DOWNSTREAM_CREDENTIALS_ENABLED:-false}
+  COYOTE_DOWNSTREAM_OAUTH_ENABLED: ${COYOTE_DOWNSTREAM_OAUTH_ENABLED:-false}
+  COYOTE_CREDENTIAL_ENCRYPTION_KEYS: ${COYOTE_CREDENTIAL_ENCRYPTION_KEYS:-{}}
+  COYOTE_CREDENTIAL_ACTIVE_KEY_VERSION: ${COYOTE_CREDENTIAL_ACTIVE_KEY_VERSION:-}
+  COYOTE_DOWNSTREAM_OAUTH_REDIRECT_BASE_URL: ${COYOTE_DOWNSTREAM_OAUTH_REDIRECT_BASE_URL:-}
+
+x-app: &app
+  image: ${COYOTE_IMAGE:?set the immutable Coyote image reference}
+  init: true
+  environment: *app-environment
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "python", "-c", "from os import environ; from urllib.parse import urlsplit; from urllib.request import Request, urlopen; host = urlsplit(environ.get('COYOTE_PUBLIC_BASE_URL', 'http://127.0.0.1')).netloc; urlopen(Request('http://127.0.0.1:8000/healthz', headers={'Host': host}), timeout=3).read()"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 15s
+  deploy:
+    resources:
+      limits:
+        cpus: ${COYOTE_CPU_LIMIT:-1.0}
+        memory: ${COYOTE_MEMORY_LIMIT:-512M}
+      reservations:
+        cpus: ${COYOTE_CPU_RESERVATION:-0.25}
+        memory: ${COYOTE_MEMORY_RESERVATION:-256M}
+
+services:
+  migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    profiles: ["release"]
+    restart: "no"
+
+  app:
+    <<: *app
+    ports:
+      - "127.0.0.1:${COYOTE_APP_PORT:-8000}:8000"

@@ -68,6 +68,30 @@ that must preserve these invariants.
   by default, no credentials in URLs, redirect prevention, and destination
   pinning. OIDC endpoints must also remain on the issuer or explicitly trusted
   host boundary.
+- **Production ingress is explicit.** Production requires an explicit external
+  PostgreSQL asyncpg URL, canonical HTTPS public origin, explicit allowed-host
+  list, and trusted proxy IP/CIDR list. Broad private/insecure endpoint settings
+  and their host allowlists are development-only. Forwarded scheme and upstream
+  request IDs are accepted only from a direct trusted proxy peer; collection
+  endpoint display uses the configured canonical origin, never a forwarded host.
+- **Migrations are release-owned.** Application replicas never run Alembic on
+  startup. A singleton deployment release operation applies the additive
+  migration history before application rollout.
+- **Security audit evidence is tenant-scoped and append-only.** Audit events
+  retain actor and target UUID snapshots without foreign keys, so later deletion
+  cannot erase history. PostgreSQL triggers and ORM hooks reject updates and
+  deletes; records are inserted through a caller-owned transaction so a
+  security-sensitive mutation and its audit event commit or roll back together.
+  Event types, outcomes, and metadata fields are allowlisted. Privileged
+  database operators remain outside this application-level guarantee.
+- **Audit retrieval remains privileged, bounded, and tenant-local.** Only human
+  organization owners and administrators with the attenuated `audit:read`
+  permission may query approved audit fields. The read service re-evaluates
+  `auth.authorize`, anchors every query and event lookup to the authenticated
+  organization, and uses an opaque keyset cursor only as a position, never as
+  authorization. Service principals and MCP tool execution have no ledger-read
+  capability. Filters are allowlisted; arbitrary metadata predicates and raw
+  queries are not supported.
 - **MCP gateway operations are PAT-only, publication-gated, and authorization is current.** The
   Streamable HTTP endpoint at `/mcp` rejects absent, invalid, expired, revoked,
   and browser-session credentials. Discovery, description, and execution load
@@ -104,6 +128,15 @@ that must preserve these invariants.
   4.1.0 does not expose a response-stream interception hook compatible with its
   Streamable HTTP client, so the result-size bound is enforced immediately after
   FastMCP deserializes the result rather than while its response body streams.
+- **MCP execution audit evidence is bounded and best-effort.** The single
+  `GatewayService.execute_tool` execution boundary emits at most one
+  `mcp.execution` event per decision, after it has a terminal classification.
+  It records the authenticated actor and organization, request correlation,
+  tool and server UUIDs, a controlled outcome/category, and duration only.
+  It never records arguments, results, headers, credentials, or downstream
+  error text. The independent bounded audit transaction cannot retry a tool
+  call or change its result when persistence is unavailable; it emits a
+  sanitized operational warning instead.
 - **MCP network work does not hold registry read transactions.** Execution
   snapshots authorization and routing data in a dedicated short-lived session,
   which closes before validation or downstream network I/O. It does not commit

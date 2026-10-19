@@ -1,6 +1,7 @@
 import asyncio
 import os
 from collections.abc import AsyncIterator, Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -9,11 +10,20 @@ import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from coyote_mcp import catalog, oidc
 from coyote_mcp.app import app
+from coyote_mcp.audit import (
+    AuditAction,
+    AuditActorType,
+    AuditOutcome,
+    AuditTargetType,
+    record_audit_event,
+    record_independent_denial_event,
+)
+from coyote_mcp.audit_retrieval import AuditEventFilters, list_audit_events
 from coyote_mcp.auth import AuthenticatedPrincipal
 from coyote_mcp.db import get_session
 from coyote_mcp.discovery import (
@@ -23,6 +33,7 @@ from coyote_mcp.discovery import (
     reconcile_tools,
 )
 from coyote_mcp.models import (
+    AuditEvent,
     Collection,
     CollectionMembership,
     CollectionToolPublication,
@@ -133,6 +144,231 @@ async def test_postgres_migration_and_jsonb_persistence(
         )
 
     assert persisted_type == "jsonb"
+
+
+@pytest.mark.asyncio
+async def test_postgres_audit_retrieval_keyset_index_exists(
+    postgres_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    async with postgres_sessions() as session:
+        index_name = await session.scalar(
+            text(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE schemaname = current_schema() "
+                "AND tablename = 'audit_events' "
+                "AND indexname = 'ix_audit_events_organization_occurred_at_id'"
+            )
+        )
+
+    assert index_name == "ix_audit_events_organization_occurred_at_id"
+
+
+@pytest.mark.asyncio
+async def test_postgres_audit_retrieval_is_tenant_scoped_and_historical(
+    postgres_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    async with postgres_sessions() as session:
+        organization = Organization(slug="audit-retrieval", display_name="Audit Retrieval")
+        other_organization = Organization(
+            slug="audit-retrieval-other", display_name="Audit Retrieval Other"
+        )
+        auditor = Principal(identifier="audit-retrieval-auditor", display_name="Auditor")
+        historical_actor = Principal(identifier="audit-retrieval-actor", display_name="Actor")
+        other_auditor = Principal(identifier="audit-retrieval-other-auditor", display_name="Other")
+        session.add_all(
+            [organization, other_organization, auditor, historical_actor, other_auditor]
+        )
+        await session.flush()
+        session.add_all(
+            [
+                OrganizationMembership(organization_id=organization.id, principal_id=auditor.id),
+                OrganizationMembership(
+                    organization_id=organization.id, principal_id=historical_actor.id
+                ),
+                OrganizationMembership(
+                    organization_id=other_organization.id, principal_id=other_auditor.id
+                ),
+                RoleAssignment(
+                    organization_id=organization.id, principal_id=auditor.id, role="owner"
+                ),
+                RoleAssignment(
+                    organization_id=other_organization.id,
+                    principal_id=other_auditor.id,
+                    role="owner",
+                ),
+            ]
+        )
+        occurred_at = datetime(2026, 10, 19, 12, tzinfo=UTC)
+        oldest_event = AuditEvent(
+            id=UUID(int=1),
+            occurred_at=occurred_at,
+            organization_id=organization.id,
+            actor_id=historical_actor.id,
+            actor_type=AuditActorType.HUMAN.value,
+            action=AuditAction.SERVER_CREATED.value,
+            target_type=AuditTargetType.SERVER.value,
+            target_id=None,
+            outcome=AuditOutcome.SUCCESS.value,
+            metadata_={},
+        )
+        second_event = AuditEvent(
+            id=UUID(int=2),
+            occurred_at=occurred_at + timedelta(seconds=1),
+            organization_id=organization.id,
+            actor_id=auditor.id,
+            actor_type=AuditActorType.HUMAN.value,
+            action=AuditAction.SERVER_CREATED.value,
+            target_type=AuditTargetType.SERVER.value,
+            target_id=None,
+            outcome=AuditOutcome.SUCCESS.value,
+            metadata_={},
+        )
+        newest_event = AuditEvent(
+            id=UUID(int=3),
+            occurred_at=occurred_at + timedelta(seconds=2),
+            organization_id=organization.id,
+            actor_id=auditor.id,
+            actor_type=AuditActorType.HUMAN.value,
+            action=AuditAction.SERVER_CREATED.value,
+            target_type=AuditTargetType.SERVER.value,
+            target_id=None,
+            outcome=AuditOutcome.SUCCESS.value,
+            metadata_={},
+        )
+        other_event = AuditEvent(
+            id=UUID(int=4),
+            occurred_at=occurred_at,
+            organization_id=other_organization.id,
+            actor_id=other_auditor.id,
+            actor_type=AuditActorType.HUMAN.value,
+            action=AuditAction.SERVER_CREATED.value,
+            target_type=AuditTargetType.SERVER.value,
+            target_id=None,
+            outcome=AuditOutcome.SUCCESS.value,
+            metadata_={},
+        )
+        session.add_all([oldest_event, second_event, newest_event, other_event])
+        await session.commit()
+
+        current = AuthenticatedPrincipal(auditor, frozenset({"audit:read"}), None, organization.id)
+        first_page = await list_audit_events(session, current, limit=2)
+        assert [event.id for event in first_page.events] == [newest_event.id, second_event.id]
+        assert first_page.next_cursor is not None
+
+        session.add(
+            AuditEvent(
+                id=UUID(int=5),
+                occurred_at=occurred_at + timedelta(seconds=3),
+                organization_id=organization.id,
+                actor_id=auditor.id,
+                actor_type=AuditActorType.HUMAN.value,
+                action=AuditAction.SERVER_CREATED.value,
+                target_type=AuditTargetType.SERVER.value,
+                target_id=None,
+                outcome=AuditOutcome.SUCCESS.value,
+                metadata_={},
+            )
+        )
+        await session.commit()
+        second_page = await list_audit_events(session, current, cursor=first_page.next_cursor)
+        assert [event.id for event in second_page.events] == [oldest_event.id]
+
+        historical_actor_id = historical_actor.id
+        await session.delete(historical_actor)
+        await session.commit()
+        historical_page = await list_audit_events(
+            session,
+            current,
+            filters=AuditEventFilters(actor_id=historical_actor_id),
+        )
+        assert [event.id for event in historical_page.events] == [oldest_event.id]
+
+        other_current = AuthenticatedPrincipal(
+            other_auditor, frozenset({"audit:read"}), None, other_organization.id
+        )
+        other_page = await list_audit_events(session, other_current, cursor=first_page.next_cursor)
+        assert [event.id for event in other_page.events] == [other_event.id]
+
+
+@pytest.mark.asyncio
+async def test_postgres_audit_events_are_immutable_and_jsonb(
+    postgres_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    async with postgres_sessions() as session:
+        organization = Organization(slug="audit-postgres", display_name="Audit PostgreSQL")
+        session.add(organization)
+        await session.flush()
+        event = await record_audit_event(
+            session,
+            organization_id=organization.id,
+            actor_type=AuditActorType.SYSTEM,
+            actor_id=None,
+            action=AuditAction.SERVER_SYNC,
+            target_type=AuditTargetType.SERVER,
+            target_id=uuid4(),
+            outcome=AuditOutcome.SUCCESS,
+            metadata={"result_code": "ok", "tool_count": 2},
+        )
+        await session.commit()
+        event_id = event.id
+        persisted_type = await session.scalar(
+            text("SELECT pg_typeof(metadata)::text FROM audit_events WHERE id = :id"),
+            {"id": event_id},
+        )
+        with pytest.raises(DBAPIError) as update_error:
+            await session.execute(
+                text("UPDATE audit_events SET outcome = 'failure' WHERE id = :id"),
+                {"id": event_id},
+            )
+        assert update_error.value.orig.sqlstate == "P0001"
+        await session.rollback()
+        with pytest.raises(DBAPIError) as delete_error:
+            await session.execute(text("DELETE FROM audit_events WHERE id = :id"), {"id": event_id})
+        assert delete_error.value.orig.sqlstate == "P0001"
+        await session.rollback()
+
+    assert persisted_type == "jsonb"
+
+
+@pytest.mark.asyncio
+async def test_postgres_independent_denial_event_survives_request_rollback(
+    postgres_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    async with postgres_sessions() as setup_session:
+        organization = Organization(
+            slug="independent-denial-postgres",
+            display_name="Independent Denial PostgreSQL",
+        )
+        setup_session.add(organization)
+        await setup_session.commit()
+
+    async with postgres_sessions() as request_session:
+        request_principal = Principal(
+            identifier="rollback-only-principal",
+            display_name="Rollback Only Principal",
+        )
+        request_session.add(request_principal)
+        await request_session.flush()
+        await record_independent_denial_event(
+            request_session,
+            organization_id=organization.id,
+            action=AuditAction.AUTHENTICATION_FAILED,
+            target_type=AuditTargetType.AUTHENTICATION,
+            metadata={"auth_method": "pat", "failure_code": "revoked"},
+        )
+        await request_session.rollback()
+
+    async with postgres_sessions() as verify_session:
+        event = await verify_session.scalar(
+            select(AuditEvent).where(AuditEvent.action == AuditAction.AUTHENTICATION_FAILED.value)
+        )
+        rolled_back_principal = await verify_session.scalar(
+            select(Principal).where(Principal.identifier == "rollback-only-principal")
+        )
+
+    assert event is not None
+    assert event.organization_id == organization.id
+    assert rolled_back_principal is None
 
 
 @pytest.mark.asyncio

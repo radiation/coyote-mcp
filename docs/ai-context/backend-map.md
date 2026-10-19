@@ -5,22 +5,24 @@
 | Area | Current responsibility |
 | --- | --- |
 | `app.py` | Builds FastAPI/FastMCP applications, mounts REST/OIDC routes, authenticates PAT-only MCP requests, and serves global plus request-scoped collection MCP endpoints. |
+| `audit.py` | Central append-only audit-event persistence service. It validates enum-backed actions and bounded allowlisted metadata, adds and flushes successful events in a caller-owned transaction, and independently commits attributable authentication failures, authorization denials, and MCP execution outcomes in a short-lived session without altering the original result if persistence fails. |
+| `audit_retrieval.py` | Read-only audit service. It re-evaluates `audit:read` through centralized authorization, fixes every query to the authenticated organization, accepts only validated filters, and performs bounded descending keyset pagination using timestamp and event UUID. |
 | `console.py` | Server-rendered `/console` routes. Resolves browser sessions only, persists selection/switching of an active organization server-side with CSRF protection, and reuses centralized authorization for organization-scoped pages. `GET /console/organizations` always renders the selector for an authenticated browser session, including sessions with an active organization. Instance administrators can select any enabled organization and create departments. Server, collection, membership, and tool-publication pages delegate all state changes to `catalog.py` services. |
-| `api.py` | Authenticated control-plane endpoints for catalog, PATs, service principals, groups, and mappings. |
-| `catalog.py` | Organization-scoped server, collection, membership, catalog, and collection tool-publication queries and mutations. Publication services check for alias and tool conflicts, use savepoints for constraint violations, and bound list queries. |
+| `api.py` | Authenticated control-plane endpoints for catalog, PATs, service principals, groups, mappings, and owner/administrator audit-ledger retrieval. |
+| `catalog.py` | Organization-scoped server, collection, membership, catalog, and collection tool-publication queries and mutations. Successful security-sensitive mutations record tenant- and actor-attributed audit events before their owning commit. Publication services check for alias and tool conflicts, use savepoints for constraint violations, and bound list queries. |
 | `discovery.py` | Streamable HTTP tool discovery, pinned HTTP transport, reconciliation, and generation-safe sync. |
 | `credential_vault.py` | AES-256-GCM sealing with key versions and domain-prefixed AAD. Used only for downstream secrets, tokens, and PKCE verifiers. |
 | `credentials.py` | Credential broker for `none`, `shared_bearer`, and `per_user_oauth`. Returns per-call authorization headers, rejects service-principal personal credentials, and marks rejected connections for reauthorization. |
 | `downstream_oauth.py` | Reusable OAuth authorization-code protocol pieces: PKCE, state, the GitHub preset, validated token exchange, and token-set redaction. |
 | `downstream_errors.py` | Leaf module with the sanitized downstream authorization error type, shared without an import cycle. |
-| `connected_apps.py` | Self-service Connected Apps and administrator integration services: start, complete, and disconnect connections, plus policy and shared-credential writes. |
-| `gateway.py` | Publication-gated persisted-catalog MCP search, description, collection endpoint publication, execution-time authorization snapshots, spawned and resource-bounded schema validation, escaped lexical search, bounded downstream invocation, and result sanitization. Global and native endpoints resolve enabled collection publication records for discovery and invocation. Execution attaches only the broker-selected downstream credential for the caller. |
-| `auth.py` | PAT/browser authentication, immutable authenticated organization context, session lifecycle, memberships, roles, group mappings, browser-session-only instance-admin authorization, organization creation, and batched collection-grant evaluation. |
+| `connected_apps.py` | Self-service Connected Apps and administrator integration services: start, complete, and disconnect connections, plus policy and shared-credential writes. Each successful local security mutation records a safe, transaction-bound audit event; provider-side disconnect revocation remains best-effort after the local atomic deletion. |
+| `gateway.py` | Publication-gated persisted-catalog MCP search, description, collection endpoint publication, execution-time authorization snapshots, spawned and resource-bounded schema validation, escaped lexical search, bounded downstream invocation, and result sanitization. Its single execution boundary independently records one bounded `mcp.execution` outcome with actor/tenant, correlation, UUID target, safe category, and duration. Global and native endpoints resolve enabled collection publication records for discovery and invocation. Execution attaches only the broker-selected downstream credential for the caller. |
+| `auth.py` | PAT/browser authentication, immutable authenticated organization context, session lifecycle, memberships, roles, group mappings, browser-session-only instance-admin authorization, organization creation, and batched collection-grant evaluation. Organization bootstrap and actor-aware PAT issuance are transactionally audited; attributable PAT/browser authentication failures are independently audited as system events. |
 | `oidc.py` | Settings-configured single-provider OIDC discovery, PKCE login, browser binding, code exchange, ID-token validation, and logout/CSRF flows. |
 | `security.py` | Destination, public-address, scheme, and OIDC trust-boundary validation. |
-| `models.py` | SQLAlchemy persistence model and tenant-scoped constraints. |
+| `models.py` | SQLAlchemy persistence model and tenant-scoped constraints, including immutable audit-event schema constraints. |
 | `schemas.py` | Pydantic API request/response contracts. |
-| `db.py`, `settings.py` | Async database session factory and environment-only OIDC configuration rules. |
+| `db.py`, `settings.py`, `runtime.py` | Async database session factory and shutdown disposal; development-compatible but fail-closed production settings; trusted-proxy forwarding, host validation, canonical public origin, and request correlation. |
 | `cli.py` | Operator-only trusted issuer/subject binding for instance-administrator bootstrap and recovery; it never issues a PAT or browser session. |
 | `scripts/mock_mcp_server.py` | Compose-profile-only FastMCP mock exposing deterministic echo, addition, and failure tools. |
 | `scripts/smoke_mcp.py` | Live local smoke runner: temporary tenant bootstrap/cleanup plus REST and authenticated MCP workflow validation. |
@@ -56,6 +58,11 @@
    cover instance-admin department creation, server registration, edit, enable,
    disable, discovery refresh, and removal, collection create/edit/enable and
    membership changes, and tool publication create, edit, and unpublish.
+6. Production ingress validates the `Host` header, accepts forwarded scheme and
+   upstream request IDs only when the direct peer is an allowlisted proxy
+   network, generates a request ID otherwise, and returns it as
+   `X-Request-ID`. Console collection endpoint display uses the configured
+   public origin rather than request-derived host data.
 
 ## Extension points
 

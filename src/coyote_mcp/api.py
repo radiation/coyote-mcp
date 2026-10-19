@@ -2,12 +2,27 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coyote_mcp import catalog
+from coyote_mcp.audit import (
+    AuditAction,
+    AuditActorType,
+    AuditOutcome,
+    AuditTargetType,
+    record_independent_denial_event,
+    record_principal_audit_event,
+)
+from coyote_mcp.audit_retrieval import (
+    AuditEventFilters,
+    AuditQueryValidationError,
+    AuditRetrievalAuthorizationError,
+    get_audit_event,
+    list_audit_events,
+)
 from coyote_mcp.auth import (
     ROLE_PERMISSIONS,
     AuthenticatedPrincipal,
@@ -32,6 +47,8 @@ from coyote_mcp.models import (
     RoleAssignment,
 )
 from coyote_mcp.schemas import (
+    AuditEventPageResponse,
+    AuditEventResponse,
     CollectionCreate,
     CollectionDetailResponse,
     CollectionResponse,
@@ -80,6 +97,7 @@ async def require(
     resource: object | None = None,
 ) -> None:
     if action not in current.scopes:
+        await _record_authorization_denial(session, current, action, "scope_not_granted")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions."
         )
@@ -100,9 +118,87 @@ async def require(
         current.credential_context,
     )
     if not decision.allowed:
+        await _record_authorization_denial(session, current, action, decision.reason)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions."
         )
+
+
+async def _record_authorization_denial(
+    session: AsyncSession, current: AuthenticatedPrincipal, action: str, reason_code: str
+) -> None:
+    if current.organization_id is None:
+        return
+    await record_independent_denial_event(
+        session,
+        organization_id=current.organization_id,
+        action=AuditAction.AUTHORIZATION_DENIED,
+        target_type=AuditTargetType.AUTHORIZATION,
+        metadata={"action": action, "reason_code": reason_code},
+        actor_type=(
+            AuditActorType.SERVICE
+            if current.principal.identity_type == "service"
+            else AuditActorType.HUMAN
+        ),
+        actor_id=current.principal.id,
+    )
+
+
+@router.get("/audit-events", response_model=AuditEventPageResponse)
+async def list_organization_audit_events(
+    session: Session,
+    current: Current,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    cursor: str | None = None,
+    occurred_after: datetime | None = None,
+    occurred_before: datetime | None = None,
+    action: AuditAction | None = None,
+    outcome: AuditOutcome | None = None,
+    actor_id: UUID | None = None,
+    target_type: AuditTargetType | None = None,
+    target_id: UUID | None = None,
+) -> AuditEventPageResponse:
+    await require(session, current, "audit:read")
+    try:
+        page_result = await list_audit_events(
+            session,
+            current,
+            limit=limit,
+            cursor=cursor,
+            filters=AuditEventFilters(
+                occurred_after=occurred_after,
+                occurred_before=occurred_before,
+                action=action,
+                outcome=outcome,
+                actor_id=actor_id,
+                target_type=target_type,
+                target_id=target_id,
+            ),
+        )
+    except (AuditQueryValidationError, AuditRetrievalAuthorizationError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+        ) from error
+    return AuditEventPageResponse(
+        events=[AuditEventResponse.model_validate(event) for event in page_result.events],
+        next_cursor=page_result.next_cursor,
+    )
+
+
+@router.get("/audit-events/{event_id}", response_model=AuditEventResponse)
+async def audit_event_details(
+    event_id: UUID, session: Session, current: Current
+) -> AuditEventResponse:
+    await require(session, current, "audit:read")
+    try:
+        event = await get_audit_event(session, current, event_id)
+    except AuditRetrievalAuthorizationError as error:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions."
+        ) from error
+    if event is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found.")
+    return AuditEventResponse.model_validate(event)
 
 
 @router.post("/servers", response_model=ServerResponse, status_code=status.HTTP_201_CREATED)
@@ -435,6 +531,7 @@ async def create_pat(request: PATCreate, session: Session, current: Current) -> 
             request.scopes,
             timedelta(seconds=request.lifetime_seconds),
             Settings(),
+            actor=current.principal,
         )
     except ValueError as error:
         raise HTTPException(
@@ -455,7 +552,17 @@ async def revoke_pat(token_id: UUID, session: Session, current: Current) -> None
     )
     if token is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found.")
-    token.revoked_at = datetime.now(UTC)
+    if token.revoked_at is None:
+        token.revoked_at = datetime.now(UTC)
+        await record_principal_audit_event(
+            session,
+            organization_id=current.require_organization_id(),
+            actor=current.principal,
+            action=AuditAction.CREDENTIAL_REVOKED,
+            target_type=AuditTargetType.CREDENTIAL,
+            target_id=token.id,
+            metadata={"credential_kind": "pat"},
+        )
     await session.commit()
 
 
@@ -520,6 +627,15 @@ async def create_service_principal(
                 for role in request.roles
             ]
         )
+        await record_principal_audit_event(
+            session,
+            organization_id=current.require_organization_id(),
+            actor=current.principal,
+            action=AuditAction.PRINCIPAL_CREATED,
+            target_type=AuditTargetType.PRINCIPAL,
+            target_id=principal.id,
+            metadata={"identity_type": "service", "role_count": len(request.roles)},
+        )
         await session.commit()
     except IntegrityError as error:
         await session.rollback()
@@ -557,7 +673,17 @@ async def disable_service_principal(principal_id: UUID, session: Session, curren
     principal = await service_principal_or_404(
         session, current.require_organization_id(), principal_id
     )
-    principal.enabled = False
+    if principal.enabled:
+        principal.enabled = False
+        await record_principal_audit_event(
+            session,
+            organization_id=current.require_organization_id(),
+            actor=current.principal,
+            action=AuditAction.PRINCIPAL_DISABLED,
+            target_type=AuditTargetType.PRINCIPAL,
+            target_id=principal.id,
+            metadata={"identity_type": "service"},
+        )
     await session.commit()
 
 
@@ -591,6 +717,7 @@ async def issue_service_pat(
             request.scopes,
             timedelta(seconds=request.lifetime_seconds),
             Settings(),
+            actor=current.principal,
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
@@ -614,7 +741,17 @@ async def revoke_service_pat(
     )
     if token is None:
         raise HTTPException(status_code=404, detail="Resource not found.")
-    token.revoked_at = datetime.now(UTC)
+    if token.revoked_at is None:
+        token.revoked_at = datetime.now(UTC)
+        await record_principal_audit_event(
+            session,
+            organization_id=current.require_organization_id(),
+            actor=current.principal,
+            action=AuditAction.CREDENTIAL_REVOKED,
+            target_type=AuditTargetType.CREDENTIAL,
+            target_id=token.id,
+            metadata={"credential_kind": "pat"},
+        )
     await session.commit()
 
 
@@ -630,6 +767,15 @@ async def create_external_group(
     )
     session.add(group)
     try:
+        await session.flush()
+        await record_principal_audit_event(
+            session,
+            organization_id=current.require_organization_id(),
+            actor=current.principal,
+            action=AuditAction.GROUP_CREATED,
+            target_type=AuditTargetType.POLICY,
+            target_id=group.id,
+        )
         await session.commit()
     except IntegrityError as error:
         await session.rollback()
@@ -662,6 +808,19 @@ async def create_group_role_mapping(
     )
     session.add(mapping)
     try:
+        await session.flush()
+        await record_principal_audit_event(
+            session,
+            organization_id=current.require_organization_id(),
+            actor=current.principal,
+            action=AuditAction.ROLE_MAPPING_CREATED,
+            target_type=AuditTargetType.POLICY,
+            target_id=mapping.id,
+            metadata={
+                "role": mapping.role,
+                "scope": "collection" if mapping.collection_id is not None else "organization",
+            },
+        )
         await session.commit()
     except IntegrityError as error:
         await session.rollback()
